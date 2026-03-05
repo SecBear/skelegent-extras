@@ -1,19 +1,27 @@
 //! CozoDB engine wrapper.
 //!
 //! Provides [`CozoEngine`]: a typed wrapper over CozoDB's `DbInstance`
-//! (or an in-memory HashMap placeholder when the `rocksdb` feature is disabled).
+//! (or an in-memory HashMap placeholder when the `cozo` feature is disabled).
 //!
 //! Schema initialization via [`CozoEngine::ensure_schema`] is idempotent.
 
 use thiserror::Error;
 
-// HashMap backend imports — only needed when rocksdb feature is off.
-#[cfg(not(feature = "rocksdb"))]
+// HashMap backend imports — only needed when cozo feature is off.
+#[cfg(not(feature = "cozo"))]
 use std::collections::HashMap;
-#[cfg(not(feature = "rocksdb"))]
+#[cfg(not(feature = "cozo"))]
 use std::sync::Arc;
-#[cfg(not(feature = "rocksdb"))]
+#[cfg(not(feature = "cozo"))]
 use tokio::sync::RwLock;
+
+// Real CozoDB imports — only needed when cozo feature is on.
+#[cfg(feature = "cozo")]
+use std::collections::BTreeMap;
+#[cfg(feature = "cozo")]
+pub(crate) use cozo::DataValue;
+#[cfg(feature = "cozo")]
+use cozo::NamedRows;
 
 /// Error type for [`CozoEngine`] operations.
 #[derive(Debug, Error)]
@@ -36,7 +44,7 @@ impl From<CozoError> for layer0::error::StateError {
 // ── HashMap backend (default, no native deps) ─────────────────────────────────
 
 /// A directed edge stored in the graph.
-#[cfg(not(feature = "rocksdb"))]
+#[cfg(not(feature = "cozo"))]
 #[derive(Debug, Clone)]
 pub(crate) struct EdgeRecord {
     /// Serialized scope prefix (from [`crate::scope::scope_prefix`]).
@@ -58,7 +66,7 @@ pub(crate) struct EdgeRecord {
 }
 
 /// Heap-allocated inner storage for the in-memory backend.
-#[cfg(not(feature = "rocksdb"))]
+#[cfg(not(feature = "cozo"))]
 #[derive(Debug, Default)]
 pub(crate) struct EngineInner {
     /// Key-value store: composite key → JSON-encoded value string.
@@ -69,11 +77,11 @@ pub(crate) struct EngineInner {
 
 /// Typed wrapper over CozoDB's storage engine.
 ///
-/// When the `rocksdb` feature is **disabled** (default), this wraps an in-memory
+/// When the `cozo` feature is **disabled** (default), this wraps an in-memory
 /// [`HashMap`] — suitable for testing and development without any C dependencies.
 ///
-/// Enable the `rocksdb` feature to swap in a real [`cozo::DbInstance`] backed
-/// by RocksDB persistent storage. Requires cmake and a C++ compiler.
+/// Enable the `cozo` feature to swap in a real [`cozo::DbInstance`] with
+/// in-memory Datalog storage. Add `rocksdb` for persistent on-disk storage.
 ///
 /// `CozoEngine` is cheaply cloneable — clones share the same underlying storage
 /// (via [`Arc`]).
@@ -84,20 +92,20 @@ pub(crate) struct EngineInner {
 /// [`ensure_schema`]: CozoEngine::ensure_schema
 /// [`HashMap`]: std::collections::HashMap
 /// [`Arc`]: std::sync::Arc
-#[cfg(not(feature = "rocksdb"))]
+#[cfg(not(feature = "cozo"))]
 #[derive(Debug, Clone)]
 pub struct CozoEngine {
     pub(crate) inner: Arc<RwLock<EngineInner>>,
 }
 
-#[cfg(not(feature = "rocksdb"))]
+#[cfg(not(feature = "cozo"))]
 impl CozoEngine {
     /// Open or create a CozoDB database at the given path.
     ///
     /// Pass `":memory:"` to create an ephemeral in-memory database, or use
     /// [`CozoEngine::memory`] as a convenience constructor.
     ///
-    /// When the `rocksdb` feature is disabled, `path` is ignored and an
+    /// When the `cozo` feature is disabled, `path` is ignored and an
     /// in-memory HashMap backend is always used.
     ///
     /// # Errors
@@ -137,12 +145,13 @@ impl CozoEngine {
     }
 }
 
-// ── RocksDB backend (requires `--features rocksdb`, cmake, C++ compiler) ──────
+// ── Real CozoDB backend (requires `--features cozo`) ──────────────────────────
 
-/// Typed wrapper over a real CozoDB `DbInstance` with RocksDB storage.
+/// Typed wrapper over a real CozoDB `DbInstance`.
 ///
-/// Enabled by the `rocksdb` cargo feature. Requires cmake and a C++ compiler
-/// in the build environment.
+/// Enabled by the `cozo` cargo feature. With `rocksdb` also enabled, persistent
+/// RocksDB storage is available via [`CozoEngine::open`]. Without `rocksdb`,
+/// only in-memory Datalog storage is used.
 ///
 /// Use [`CozoStore::memory`] for ephemeral storage or [`CozoStore::open`] for
 /// persistent on-disk storage.
@@ -153,27 +162,55 @@ impl CozoEngine {
 /// [`CozoStore::memory`]: crate::store::CozoStore::memory
 /// [`CozoStore::open`]: crate::store::CozoStore::open
 /// [`ensure_schema`]: CozoEngine::ensure_schema
-#[cfg(feature = "rocksdb")]
+#[cfg(feature = "cozo")]
 pub struct CozoEngine {
     db: cozo::DbInstance,
 }
 
-#[cfg(feature = "rocksdb")]
+#[cfg(feature = "cozo")]
 impl std::fmt::Debug for CozoEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CozoEngine").finish_non_exhaustive()
     }
 }
 
-#[cfg(feature = "rocksdb")]
+#[cfg(feature = "cozo")]
 impl CozoEngine {
+    /// Open or create a CozoDB database at the given path.
+    ///
+    /// With the `rocksdb` feature enabled, uses the RocksDB engine for
+    /// persistent storage. Without `rocksdb`, uses the `mem` engine and
+    /// `path` is ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CozoError::Database`] if the engine cannot be initialized.
+    pub fn new(path: &str) -> Result<Self, CozoError> {
+        #[cfg(feature = "rocksdb")]
+        {
+            let db = cozo::DbInstance::new("rocksdb", path, Default::default())
+                .map_err(|e| CozoError::Database(e.to_string()))?;
+            Ok(Self { db })
+        }
+        #[cfg(not(feature = "rocksdb"))]
+        {
+            let _ = path;
+            let db = cozo::DbInstance::new("mem", "", Default::default())
+                .map_err(|e| CozoError::Database(e.to_string()))?;
+            Ok(Self { db })
+        }
+    }
+
     /// Open or create a persistent CozoDB RocksDB database at the given path.
     ///
     /// The directory at `path` is created if it does not exist.
     ///
+    /// **Requires the `rocksdb` feature.**
+    ///
     /// # Errors
     ///
     /// Returns [`CozoError::Database`] if the RocksDB engine cannot be opened.
+    #[cfg(feature = "rocksdb")]
     pub fn open(path: &str) -> Result<Self, CozoError> {
         let db = cozo::DbInstance::new("rocksdb", path, Default::default())
             .map_err(|e| CozoError::Database(e.to_string()))?;
@@ -203,13 +240,38 @@ impl CozoEngine {
     ///
     /// Returns [`CozoError::Database`] if DDL execution fails.
     pub fn ensure_schema(&self) -> Result<(), CozoError> {
-        self.db
-            .run_script(
-                crate::schema::DDL_INIT,
-                Default::default(),
-                cozo::ScriptMutability::Mutable,
-            )
-            .map_err(|e| CozoError::Database(format!("{e:?}")))?;
+        // CozoDB requires each :create command in its own run_script call.
+        for ddl in [
+            crate::schema::KV_DDL,
+            crate::schema::NODE_DDL,
+            crate::schema::EDGE_DDL,
+        ] {
+            self.db
+                .run_script(ddl, Default::default(), cozo::ScriptMutability::Mutable)
+                .map_err(|e| CozoError::Database(format!("{e:?}")))?;
+        }
         Ok(())
+    }
+
+    /// Execute a read-only CozoScript query.
+    pub(crate) fn run_query(
+        &self,
+        script: &str,
+        params: BTreeMap<String, DataValue>,
+    ) -> Result<NamedRows, CozoError> {
+        self.db
+            .run_script(script, params, cozo::ScriptMutability::Immutable)
+            .map_err(|e| CozoError::Database(format!("{e:?}")))
+    }
+
+    /// Execute a mutable CozoScript query (put/rm).
+    pub(crate) fn run_mutation(
+        &self,
+        script: &str,
+        params: BTreeMap<String, DataValue>,
+    ) -> Result<NamedRows, CozoError> {
+        self.db
+            .run_script(script, params, cozo::ScriptMutability::Mutable)
+            .map_err(|e| CozoError::Database(format!("{e:?}")))
     }
 }

@@ -7,6 +7,7 @@ members = [
   "state/neuron-state-sqlite",
   "state/neuron-state-cozo",
   "effects/neuron-effects-git",
+  "auth/neuron-auth-oauth",
 ]
 
 [workspace.package]

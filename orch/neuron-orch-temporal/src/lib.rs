@@ -85,6 +85,29 @@ impl TemporalOrch {
         }
     }
 
+    /// Connect to a real Temporal server.
+    ///
+    /// Only available with the `temporal-sdk` feature. Returns an error if
+    /// the server is unreachable.
+    ///
+    /// The returned orchestrator uses a gRPC client for all operations.
+    /// Operators registered via [`register()`](TemporalOrch::register) are
+    /// used for local dispatch only when running without the feature flag.
+    #[cfg(feature = "temporal-sdk")]
+    pub async fn connect(config: TemporalConfig) -> Result<Self, OrchError> {
+        use client::GrpcTemporalClient;
+        let agents = Arc::new(Mutex::new(HashMap::new()));
+        let grpc_client = GrpcTemporalClient::connect(&config)
+            .await
+            .map_err(|e| OrchError::DispatchFailed(format!("temporal connect: {e}")))?;
+        Ok(Self {
+            client: Arc::new(grpc_client),
+            config,
+            agents,
+            workflow_signals: RwLock::new(HashMap::new()),
+        })
+    }
+
     /// Register an operator under the given agent ID.
     ///
     /// After registration, `dispatch(&agent_id, …)` will route to `op`.

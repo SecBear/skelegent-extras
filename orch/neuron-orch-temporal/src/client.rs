@@ -187,6 +187,112 @@ impl TemporalClient for MockTemporalClient {
     }
 }
 
+// ── GrpcTemporalClient ────────────────────────────────────────────────────
+
+/// Real Temporal gRPC client.
+///
+/// Connects to a Temporal server via gRPC using `tonic`. Requires the
+/// `temporal-sdk` feature flag and a running Temporal server at the
+/// configured address.
+///
+/// # Phase 1 Status
+///
+/// This is a structural implementation. Full gRPC proto integration
+/// (`temporal.api.workflowservice.v1`) will be added when the Temporal
+/// Rust SDK stabilises or proto compilation is configured.
+#[cfg(feature = "temporal-sdk")]
+pub(crate) struct GrpcTemporalClient {
+    #[allow(dead_code)]
+    channel: tonic::transport::Channel,
+    namespace: String,
+    task_queue: String,
+}
+
+#[cfg(feature = "temporal-sdk")]
+impl GrpcTemporalClient {
+    /// Connect to a Temporal server using the supplied configuration.
+    pub(crate) async fn connect(
+        config: &super::config::TemporalConfig,
+    ) -> Result<Self, TemporalError> {
+        let channel = tonic::transport::Channel::from_shared(config.server_url.clone())
+            .map_err(|e| TemporalError::ConnectionFailed(e.to_string()))?
+            .connect()
+            .await
+            .map_err(|e| TemporalError::ConnectionFailed(e.to_string()))?;
+        Ok(Self {
+            channel,
+            namespace: config.namespace.clone(),
+            task_queue: config.task_queue.clone(),
+        })
+    }
+}
+
+#[cfg(feature = "temporal-sdk")]
+impl std::fmt::Debug for GrpcTemporalClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrpcTemporalClient")
+            .field("namespace", &self.namespace)
+            .field("task_queue", &self.task_queue)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "temporal-sdk")]
+#[async_trait]
+impl TemporalClient for GrpcTemporalClient {
+    async fn start_workflow(
+        &self,
+        workflow_id: &str,
+        _task_queue: &str,
+        _input: Vec<u8>,
+    ) -> Result<String, TemporalError> {
+        // Phase 1: Channel is connected but proto stubs not yet compiled.
+        // When temporal.api.workflowservice.v1 protos are available, this will:
+        // 1. Construct StartWorkflowExecutionRequest
+        // 2. Send via WorkflowService::start_workflow_execution()
+        // 3. Return the run_id from the response
+        Err(TemporalError::Other(format!(
+            "gRPC proto stubs not yet compiled; would start workflow '{}' on namespace '{}'",
+            workflow_id, self.namespace
+        )))
+    }
+
+    async fn signal_workflow(
+        &self,
+        workflow_id: &str,
+        signal_name: &str,
+        _input: Vec<u8>,
+    ) -> Result<(), TemporalError> {
+        Err(TemporalError::Other(format!(
+            "gRPC proto stubs not yet compiled; would signal '{}' on workflow '{}'",
+            signal_name, workflow_id
+        )))
+    }
+
+    async fn query_workflow(
+        &self,
+        workflow_id: &str,
+        query_type: &str,
+        _args: Vec<u8>,
+    ) -> Result<Vec<u8>, TemporalError> {
+        Err(TemporalError::Other(format!(
+            "gRPC proto stubs not yet compiled; would query '{}' on workflow '{}'",
+            query_type, workflow_id
+        )))
+    }
+
+    async fn execute_activity(
+        &self,
+        activity_id: &str,
+        _input: Vec<u8>,
+    ) -> Result<Vec<u8>, TemporalError> {
+        Err(TemporalError::Other(format!(
+            "gRPC proto stubs not yet compiled; would execute activity '{}' on queue '{}'",
+            activity_id, self.task_queue
+        )))
+    }
+}
+
 // ── Unit tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]

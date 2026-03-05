@@ -12,15 +12,16 @@ description = "CozoDB-backed StateStore implementation with graph and hybrid sea
 # By default this crate uses an in-memory HashMap backend — no native
 # dependencies required. Suitable for testing and ephemeral agent memory.
 #
-# Enable `rocksdb` to activate a real CozoDB backend with persistent RocksDB
-# storage. Requires cmake and a C++ compiler in the build environment.
+# Enable `cozo` to activate a real CozoDB backend with in-memory Datalog
+# storage (pure Rust, no native deps). Enable `rocksdb` to add persistent
+# RocksDB storage on top (requires cmake + C++ compiler).
 #
 [features]
 default = []
-# Activate real CozoDB backend with RocksDB storage.
-# Requires cmake and C++ compiler in build environment.
-# Without this feature, a HashMap-based stub is used.
-rocksdb = ["dep:cozo"]
+# Real CozoDB with in-memory storage (Datalog queries, no native deps)
+cozo = ["dep:cozo", "cozo/rayon"]
+# Real CozoDB with RocksDB persistent storage (requires cmake + C++)
+rocksdb = ["cozo", "cozo/storage-rocksdb"]
 
 [dependencies]
 layer0 = { path = "../../../neuron/layer0", version = "0.4.0" }
@@ -29,7 +30,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
-cozo = { version = "0.7.6", default-features = false, features = ["storage-rocksdb", "graph-algo"], optional = true }
+cozo = { version = "0.7.6", default-features = false, features = ["rayon"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

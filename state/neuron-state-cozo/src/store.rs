@@ -10,8 +10,12 @@
 //! - `read_hinted` and `write_hinted` delegate to `read`/`write`, ignoring
 //!   advisory hints. Backends may honour hints in future revisions.
 
-use crate::engine::{CozoEngine, EdgeRecord};
-use crate::scope::{composite_key, extract_key, scope_prefix};
+#[cfg(not(feature = "cozo"))]
+use crate::engine::EdgeRecord;
+use crate::engine::CozoEngine;
+use crate::scope::scope_prefix;
+#[cfg(not(feature = "cozo"))]
+use crate::scope::{composite_key, extract_key};
 use async_trait::async_trait;
 use layer0::effect::Scope;
 use layer0::error::StateError;
@@ -22,10 +26,12 @@ use std::collections::{HashSet, VecDeque};
 ///
 /// # Backends
 ///
-/// - **Default** (no `rocksdb` feature): wraps an in-memory [`HashMap`] suitable
+/// - **Default** (no `cozo` feature): wraps an in-memory [`HashMap`] suitable
 ///   for testing and single-process use without durability.
-/// - **`rocksdb` feature**: wraps a real CozoDB `DbInstance` backed by RocksDB,
-///   enabling Datalog graph traversal, HNSW vector search, and FTS.
+/// - **`cozo` feature**: wraps a real CozoDB `DbInstance` with in-memory
+///   Datalog storage, enabling Datalog graph traversal, HNSW vector search,
+///   and FTS.
+/// - **`rocksdb` feature**: adds persistent RocksDB storage on top of `cozo`.
 ///
 /// `CozoStore` is cheaply cloneable when needed — both the store and its
 /// underlying [`CozoEngine`] share the same storage via [`Arc`].
@@ -106,6 +112,9 @@ impl std::fmt::Debug for CozoStore {
     }
 }
 
+// ── HashMap backend (default, no native deps) ─────────────────────────────────
+
+#[cfg(not(feature = "cozo"))]
 #[async_trait]
 impl StateStore for CozoStore {
     async fn read(
@@ -326,6 +335,345 @@ impl StateStore for CozoStore {
                     visited.insert(edge.to_key.clone());
                     result.push(edge.to_key.clone());
                     queue.push_back((edge.to_key.clone(), depth + 1));
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    async fn search_hinted(
+        &self,
+        scope: &Scope,
+        query: &str,
+        limit: usize,
+        _options: &SearchOptions,
+    ) -> Result<Vec<SearchResult>, StateError> {
+        self.search(scope, query, limit).await
+    }
+}
+
+// ── Real CozoDB backend (requires `--features cozo`) ──────────────────────────
+
+#[cfg(feature = "cozo")]
+use crate::engine::DataValue;
+#[cfg(feature = "cozo")]
+use std::collections::BTreeMap;
+
+/// Helper: build a `BTreeMap<String, DataValue>` from key-value pairs.
+#[cfg(feature = "cozo")]
+macro_rules! cozo_params {
+    ($($key:expr => $val:expr),* $(,)?) => {{
+        let mut m = BTreeMap::<String, DataValue>::new();
+        $( m.insert($key.to_string(), $val); )*
+        m
+    }};
+}
+
+/// Extract a `String` from a `DataValue`, returning `None` for non-string values.
+#[cfg(feature = "cozo")]
+fn dv_as_string(dv: &DataValue) -> Option<String> {
+    match dv {
+        DataValue::Str(s) => Some(s.to_string()),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "cozo")]
+#[async_trait]
+impl StateStore for CozoStore {
+    async fn read(
+        &self,
+        scope: &Scope,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, StateError> {
+        let sp = scope_prefix(scope);
+        let params = cozo_params! {
+            "scope" => DataValue::Str(sp.into()),
+            "key" => DataValue::Str(key.to_string().into()),
+        };
+        let rows = self
+            .engine
+            .run_query("?[value] := *kv{scope: $scope, key: $key, value}", params)
+            .map_err(StateError::from)?;
+        match rows.rows.first() {
+            None => Ok(None),
+            Some(row) => {
+                let raw = dv_as_string(&row[0]).ok_or_else(|| {
+                    StateError::Serialization("expected string value from kv".to_string())
+                })?;
+                let val: serde_json::Value = serde_json::from_str(&raw)
+                    .map_err(|e| StateError::Serialization(e.to_string()))?;
+                Ok(Some(val))
+            }
+        }
+    }
+
+    async fn write(
+        &self,
+        scope: &Scope,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), StateError> {
+        let sp = scope_prefix(scope);
+        let raw = serde_json::to_string(&value)
+            .map_err(|e| StateError::Serialization(e.to_string()))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let params = cozo_params! {
+            "scope" => DataValue::Str(sp.into()),
+            "key" => DataValue::Str(key.to_string().into()),
+            "value" => DataValue::Str(raw.into()),
+            "now" => DataValue::from(now),
+        };
+        self.engine
+            .run_mutation(
+                "?[scope, key, value, created_at] <- [[$scope, $key, $value, $now]] :put kv {scope, key => value, created_at}",
+                params,
+            )
+            .map_err(StateError::from)?;
+        Ok(())
+    }
+
+    async fn delete(&self, scope: &Scope, key: &str) -> Result<(), StateError> {
+        let sp = scope_prefix(scope);
+        let params = cozo_params! {
+            "scope" => DataValue::Str(sp.into()),
+            "key" => DataValue::Str(key.to_string().into()),
+        };
+        self.engine
+            .run_mutation(
+                "?[scope, key] <- [[$scope, $key]] :rm kv {scope, key}",
+                params,
+            )
+            .map_err(StateError::from)?;
+        Ok(())
+    }
+
+    async fn list(&self, scope: &Scope, prefix: &str) -> Result<Vec<String>, StateError> {
+        let sp = scope_prefix(scope);
+        let params = cozo_params! {
+            "scope" => DataValue::Str(sp.into()),
+        };
+        let rows = self
+            .engine
+            .run_query("?[key] := *kv{scope: $scope, key}", params)
+            .map_err(StateError::from)?;
+        let keys: Vec<String> = rows
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let k = dv_as_string(&row[0])?;
+                if k.starts_with(prefix) {
+                    Some(k)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Ok(keys)
+    }
+
+    /// Search for entries whose key or JSON-encoded value contains `query`
+    /// (case-insensitive substring match).
+    ///
+    /// Results are sorted by score (descending). Keys that match both the key
+    /// name and the value receive a score of `1.0`; single-field matches
+    /// receive `0.5`.
+    async fn search(
+        &self,
+        scope: &Scope,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, StateError> {
+        if query.is_empty() || limit == 0 {
+            return Ok(vec![]);
+        }
+        let sp = scope_prefix(scope);
+        let params = cozo_params! {
+            "scope" => DataValue::Str(sp.into()),
+        };
+        let rows = self
+            .engine
+            .run_query("?[key, value] := *kv{scope: $scope, key, value}", params)
+            .map_err(StateError::from)?;
+
+        let query_lower = query.to_lowercase();
+        let mut results: Vec<SearchResult> = rows
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let key = dv_as_string(&row[0])?;
+                let raw = dv_as_string(&row[1])?;
+                let key_hit = key.to_lowercase().contains(&query_lower);
+                let val_hit = raw.to_lowercase().contains(&query_lower);
+                if key_hit || val_hit {
+                    let score = if key_hit && val_hit { 1.0 } else { 0.5 };
+                    let mut sr = SearchResult::new(key, score);
+                    sr.snippet = Some(raw.chars().take(120).collect());
+                    Some(sr)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(limit);
+        Ok(results)
+    }
+
+    async fn read_hinted(
+        &self,
+        scope: &Scope,
+        key: &str,
+        _options: &StoreOptions,
+    ) -> Result<Option<serde_json::Value>, StateError> {
+        self.read(scope, key).await
+    }
+
+    async fn write_hinted(
+        &self,
+        scope: &Scope,
+        key: &str,
+        value: serde_json::Value,
+        _options: &StoreOptions,
+    ) -> Result<(), StateError> {
+        self.write(scope, key, value).await
+    }
+
+    /// No-op in v1.
+    ///
+    /// CozoDB v1 does not maintain a separate transient table. Entries written
+    /// with [`Lifetime::Transient`] are stored durably and not cleared here.
+    /// A dedicated transient store is planned for v2.
+    ///
+    /// [`Lifetime::Transient`]: layer0::state::Lifetime
+    fn clear_transient(&self) {}
+
+    async fn link(&self, scope: &Scope, link: &MemoryLink) -> Result<(), StateError> {
+        let sp = scope_prefix(scope);
+        let metadata_str = link
+            .metadata
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default())
+            .unwrap_or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let params = cozo_params! {
+            "scope" => DataValue::Str(sp.into()),
+            "from_key" => DataValue::Str(link.from_key.clone().into()),
+            "to_key" => DataValue::Str(link.to_key.clone().into()),
+            "relation" => DataValue::Str(link.relation.clone().into()),
+            "metadata" => DataValue::Str(metadata_str.into()),
+            "now" => DataValue::from(now),
+        };
+        self.engine
+            .run_mutation(
+                "?[scope, from_key, to_key, relation, metadata, created_at] <- [[$scope, $from_key, $to_key, $relation, $metadata, $now]] :put edge {scope, from_key, to_key, relation => metadata, created_at}",
+                params,
+            )
+            .map_err(StateError::from)?;
+        Ok(())
+    }
+
+    async fn unlink(
+        &self,
+        scope: &Scope,
+        from_key: &str,
+        to_key: &str,
+        relation: &str,
+    ) -> Result<(), StateError> {
+        let sp = scope_prefix(scope);
+        let params = cozo_params! {
+            "scope" => DataValue::Str(sp.into()),
+            "from_key" => DataValue::Str(from_key.to_string().into()),
+            "to_key" => DataValue::Str(to_key.to_string().into()),
+            "relation" => DataValue::Str(relation.to_string().into()),
+        };
+        self.engine
+            .run_mutation(
+                "?[scope, from_key, to_key, relation] <- [[$scope, $from_key, $to_key, $relation]] :rm edge {scope, from_key, to_key, relation}",
+                params,
+            )
+            .map_err(StateError::from)?;
+        Ok(())
+    }
+
+    /// Traverse links from `from_key` using breadth-first search.
+    ///
+    /// Returns all keys reachable within `max_depth` hops via edges matching
+    /// `relation` (or any relation if `relation` is `None`). The starting key
+    /// is never included in the result. Cycle-safe: each key is visited at
+    /// most once.
+    async fn traverse(
+        &self,
+        scope: &Scope,
+        from_key: &str,
+        relation: Option<&str>,
+        max_depth: u32,
+    ) -> Result<Vec<String>, StateError> {
+        if max_depth == 0 {
+            return Ok(vec![]);
+        }
+        let sp = scope_prefix(scope);
+
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(from_key.to_string());
+
+        let mut queue: VecDeque<(String, u32)> = VecDeque::new();
+        queue.push_back((from_key.to_string(), 0));
+
+        let mut result: Vec<String> = Vec::new();
+
+        // BFS using repeated edge queries — avoids complex recursive Datalog.
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+
+            let rows = match relation {
+                Some(rel) => {
+                    let params = cozo_params! {
+                        "scope" => DataValue::Str(sp.clone().into()),
+                        "from_key" => DataValue::Str(current.clone().into()),
+                        "relation" => DataValue::Str(rel.to_string().into()),
+                    };
+                    self.engine
+                        .run_query(
+                            "?[to_key] := *edge{scope: $scope, from_key: $from_key, relation: $relation, to_key}",
+                            params,
+                        )
+                        .map_err(StateError::from)?
+                }
+                None => {
+                    let params = cozo_params! {
+                        "scope" => DataValue::Str(sp.clone().into()),
+                        "from_key" => DataValue::Str(current.clone().into()),
+                    };
+                    self.engine
+                        .run_query(
+                            "?[to_key] := *edge{scope: $scope, from_key: $from_key, to_key}",
+                            params,
+                        )
+                        .map_err(StateError::from)?
+                }
+            };
+
+            for row in &rows.rows {
+                if let Some(to_key) = dv_as_string(&row[0]) {
+                    if !visited.contains(&to_key) {
+                        visited.insert(to_key.clone());
+                        result.push(to_key.clone());
+                        queue.push_back((to_key, depth + 1));
+                    }
                 }
             }
         }
