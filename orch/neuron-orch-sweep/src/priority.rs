@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// the highest-priority decision first.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedDecision {
-    /// Unique identifier for the decision (e.g. `"D3B"`).
+    /// Unique identifier for the decision (e.g. `"topic-3b"`).
     pub decision_id: String,
     /// Computed priority score. Higher = sweep sooner. Range: ~0.0–2.0.
     pub priority: f64,
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn queued_decision_serde_round_trip() {
         let d = QueuedDecision {
-            decision_id: "D3B".to_string(),
+            decision_id: "topic-3b".to_string(),
             priority: 0.75,
             staleness_days: 30.0,
             previous_verdict: Some(VerdictStatus::Challenged),

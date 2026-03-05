@@ -37,7 +37,7 @@
 //!
 //! // Implement ResearchProvider for your backend, then:
 //! // let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(your_provider));
-//! // let verdict = op.run("D3B", None, 8.0, 10.0, &store).await?;
+//! // let verdict = op.run("topic-3b", None, 8.0, 10.0, &store).await?;
 //! ```
 
 pub mod cost;

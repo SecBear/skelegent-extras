@@ -376,15 +376,15 @@ mod tests {
     #[tokio::test]
     async fn run_sweep_returns_skipped_when_budget_is_zero() {
         let (orch, research_id, compare_id) = build_orch(
-            MockProvider::new(vec![dummy_result()], dummy_verdict("D3B")),
-            MockProvider::new(vec![], dummy_verdict("D3B")),
+            MockProvider::new(vec![dummy_result()], dummy_verdict("topic-3b")),
+            MockProvider::new(vec![], dummy_verdict("topic-3b")),
         );
 
         let verdict = run_sweep(
             &orch,
             &research_id,
             &compare_id,
-            "D3B",
+            "topic-3b",
             None,
             0.0,
             10.0,
@@ -401,15 +401,15 @@ mod tests {
     async fn run_sweep_returns_confirmed_low_confidence_on_no_results() {
         // Research operator returns empty results → workflow returns Confirmed(0.3).
         let (orch, research_id, compare_id) = build_orch(
-            MockProvider::new(vec![], dummy_verdict("D3B")),
-            MockProvider::new(vec![], dummy_verdict("D3B")),
+            MockProvider::new(vec![], dummy_verdict("topic-3b")),
+            MockProvider::new(vec![], dummy_verdict("topic-3b")),
         );
 
         let verdict = run_sweep(
             &orch,
             &research_id,
             &compare_id,
-            "D3B",
+            "topic-3b",
             None,
             8.0,
             10.0,
@@ -430,9 +430,9 @@ mod tests {
     #[tokio::test]
     async fn run_sweep_returns_verdict_from_operators() {
         // Full happy-path: research finds results, compare produces a verdict.
-        let expected = dummy_verdict("D3B");
+        let expected = dummy_verdict("topic-3b");
         let (orch, research_id, compare_id) = build_orch(
-            MockProvider::new(vec![dummy_result()], dummy_verdict("D3B")),
+            MockProvider::new(vec![dummy_result()], dummy_verdict("topic-3b")),
             MockProvider::new(vec![], expected.clone()),
         );
 
@@ -440,7 +440,7 @@ mod tests {
             &orch,
             &research_id,
             &compare_id,
-            "D3B",
+            "topic-3b",
             None,
             8.0,
             10.0,
@@ -449,7 +449,7 @@ mod tests {
         .await
         .expect("run_sweep should succeed");
 
-        assert_eq!(verdict.decision_id, "D3B");
+        assert_eq!(verdict.decision_id, "topic-3b");
         assert_eq!(verdict.status, VerdictStatus::Confirmed);
         // Workflow overrides processor and swept_at; provider's values are replaced.
         assert!(!verdict.swept_at.is_empty());
@@ -488,7 +488,7 @@ mod tests {
         orch.register(
             research_id.clone(),
             Arc::new(ResearchOperator::new(
-                Box::new(MockProvider::new(vec![], dummy_verdict("D3B"))),
+                Box::new(MockProvider::new(vec![], dummy_verdict("topic-3b"))),
                 SweepOperatorConfig::default(),
             )),
         );
@@ -504,7 +504,7 @@ mod tests {
             &orch,
             &research_id,
             &compare_id,
-            "D3B",
+            "topic-3b",
             None,
             8.0,
             10.0,

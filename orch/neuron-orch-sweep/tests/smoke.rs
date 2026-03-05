@@ -159,21 +159,21 @@ async fn smoke_full_cycle_with_three_decisions() {
     // Three decisions at different priorities
     let decisions = vec![
         QueuedDecision {
-            decision_id: "D1-CONFIRM".to_string(),
+            decision_id: "topic-1-confirm".to_string(),
             priority: 0.9,
             staleness_days: 30.0,
             previous_verdict: None,
             estimated_cost_usd: 0.10,
         },
         QueuedDecision {
-            decision_id: "D2-UPDATE".to_string(),
+            decision_id: "topic-2-update".to_string(),
             priority: 0.7,
             staleness_days: 20.0,
             previous_verdict: Some(VerdictStatus::Refined),
             estimated_cost_usd: 0.10,
         },
         QueuedDecision {
-            decision_id: "D3-STALE".to_string(),
+            decision_id: "topic-3-stale".to_string(),
             priority: 0.5,
             staleness_days: 45.0,
             previous_verdict: Some(VerdictStatus::Challenged),
@@ -220,9 +220,9 @@ async fn smoke_full_cycle_with_three_decisions() {
         .iter()
         .map(|v| v.decision_id.as_str())
         .collect();
-    assert!(ids.contains(&"D1-CONFIRM"), "D1 should be in verdicts");
-    assert!(ids.contains(&"D2-UPDATE"), "D2 should be in verdicts");
-    assert!(ids.contains(&"D3-STALE"), "D3 should be in verdicts");
+    assert!(ids.contains(&"topic-1-confirm"), "topic-1 should be in verdicts");
+    assert!(ids.contains(&"topic-2-update"), "topic-2 should be in verdicts");
+    assert!(ids.contains(&"topic-3-stale"), "topic-3 should be in verdicts");
 
     // Total cost should be positive
     assert!(report.total_cost_usd > 0.0, "total cost should be positive");

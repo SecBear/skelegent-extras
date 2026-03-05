@@ -219,7 +219,7 @@ mod tests {
 
     fn base_verdict() -> SweepVerdict {
         SweepVerdict {
-            decision_id: "D3B".to_string(),
+            decision_id: "topic-3b".to_string(),
             status: VerdictStatus::Refined,
             confidence: 0.85,
             num_supporting: 3,
@@ -242,10 +242,10 @@ mod tests {
 
     #[test]
     fn branch_name_format() {
-        let name = branch_name("D3B");
-        // Must start with sweep/D3B/ and end with YYYY-MM-DD
-        assert!(name.starts_with("sweep/D3B/"), "got: {name}");
-        let date_part = &name["sweep/D3B/".len()..];
+        let name = branch_name("topic-3b");
+        // Must start with sweep/topic-3b/ and end with YYYY-MM-DD
+        assert!(name.starts_with("sweep/topic-3b/"), "got: {name}");
+        let date_part = &name["sweep/topic-3b/".len()..];
         assert_eq!(
             date_part.len(),
             10,
@@ -268,7 +268,7 @@ mod tests {
     fn pr_title_format() {
         let verdict = base_verdict();
         let title = pr_title(&verdict);
-        assert!(title.starts_with("[sweep] D3B:"), "got: {title}");
+        assert!(title.starts_with("[sweep] topic-3b:"), "got: {title}");
         assert!(title.contains("refined"), "got: {title}");
         assert!(
             title.contains("Durable execution patterns remain valid"),
@@ -313,7 +313,7 @@ mod tests {
     fn pr_body_with_proposed_diff() {
         let mut verdict = base_verdict();
         verdict.proposed_diff =
-            Some("--- a/D3B.md\n+++ b/D3B.md\n@@ -1 +1 @@\n-old\n+new".to_string());
+            Some("--- a/topic-3b.md\n+++ b/topic-3b.md\n@@ -1 +1 @@\n-old\n+new".to_string());
         let body = pr_body(&verdict);
         assert!(
             body.contains("### Proposed Changes"),
@@ -349,12 +349,12 @@ mod tests {
         let digest = DailyDigest {
             date: "2026-03-04".to_string(),
             sweeps: vec![DigestEntry {
-                decision_id: "D3B".to_string(),
+                decision_id: "topic-3b".to_string(),
                 verdict: VerdictStatus::Confirmed,
                 summary: "All good.".to_string(),
             }],
             pr_activity: vec![PrActivity {
-                decision_id: "D3B".to_string(),
+                decision_id: "topic-3b".to_string(),
                 action: PrAction::AutoMerged,
                 pr_url: Some("https://github.com/owner/repo/pull/7".to_string()),
             }],
@@ -364,7 +364,7 @@ mod tests {
         };
         let body = digest_body(&digest);
         assert!(body.contains("2026-03-04"));
-        assert!(body.contains("D3B"));
+        assert!(body.contains("topic-3b"));
         assert!(body.contains("confirmed"));
         assert!(body.contains("candidate-xyz"));
         assert!(body.contains("1.230"));

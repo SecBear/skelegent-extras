@@ -265,13 +265,13 @@ mod tests {
 
     #[tokio::test]
     async fn mock_provider_returns_configured_verdict() {
-        let verdict = dummy_verdict("D3B");
+        let verdict = dummy_verdict("topic-3b");
         let provider = MockProvider::new(vec![], verdict.clone());
         let result = provider
             .compare("sys", "ctx", "research", "decision")
             .await
             .expect("compare should succeed");
-        assert_eq!(result.decision_id, "D3B");
+        assert_eq!(result.decision_id, "topic-3b");
         assert_eq!(result.status, VerdictStatus::Confirmed);
     }
 
@@ -301,7 +301,7 @@ mod tests {
         assert!(!SweepError::Permanent("bad request".into()).is_transient());
         assert!(!SweepError::LlmFailure("model error".into()).is_transient());
         assert!(!SweepError::BudgetExhausted.is_transient());
-        assert!(!SweepError::DecisionNotFound("D3B".into()).is_transient());
+        assert!(!SweepError::DecisionNotFound("topic-3b".into()).is_transient());
     }
 
     #[test]
@@ -311,7 +311,7 @@ mod tests {
             SweepError::Permanent("403 forbidden".into()),
             SweepError::LlmFailure("invalid json".into()),
             SweepError::BudgetExhausted,
-            SweepError::DecisionNotFound("D3B".into()),
+            SweepError::DecisionNotFound("topic-3b".into()),
         ];
         for err in &errors {
             let json = serde_json::to_string(err).expect("serialize");
@@ -347,7 +347,7 @@ mod tests {
     async fn mock_provider_plan_returns_none_by_default() {
         let mock = MockProvider::new(vec![], dummy_verdict("test"));
         let result = mock
-            .plan("D3B", "some decision text", Some(&VerdictStatus::Challenged))
+            .plan("topic-3b", "some decision text", Some(&VerdictStatus::Challenged))
             .await
             .expect("plan should succeed");
         assert!(result.is_none(), "default plan() should return None");

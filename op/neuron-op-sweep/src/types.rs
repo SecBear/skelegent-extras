@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn sweep_verdict_serde_round_trip() {
         let verdict = SweepVerdict {
-            decision_id: "D3B".to_string(),
+            decision_id: "topic-3b".to_string(),
             status: VerdictStatus::Confirmed,
             confidence: 0.85,
             num_supporting: 3,
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn sweep_verdict_with_proposed_diff() {
         let verdict = SweepVerdict {
-            decision_id: "D1A".to_string(),
+            decision_id: "topic-1a".to_string(),
             status: VerdictStatus::Refined,
             confidence: 0.7,
             num_supporting: 2,
@@ -199,7 +199,7 @@ mod tests {
             swept_at: "2026-03-04T18:00:00Z".to_string(),
             evidence: vec![],
             narrative: "Minor update needed.".to_string(),
-            proposed_diff: Some("--- a/decisions/D1A.md\n+++ b/decisions/D1A.md".to_string()),
+            proposed_diff: Some("--- a/decisions/topic-1a.md\n+++ b/decisions/topic-1a.md".to_string()),
         };
         let json = serde_json::to_string(&verdict).unwrap();
         let back: SweepVerdict = serde_json::from_str(&json).unwrap();

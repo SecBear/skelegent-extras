@@ -1111,11 +1111,11 @@ mod tests {
             }
         }
 
-        let mock = MockProvider::new(vec![dummy_result()], dummy_verdict("D3B"));
+        let mock = MockProvider::new(vec![dummy_result()], dummy_verdict("topic-3b"));
         let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock));
 
         let verdict = op
-            .run("D3B", None, 0.0, 10.0, &EmptyStore)
+            .run("topic-3b", None, 0.0, 10.0, &EmptyStore)
             .await
             .expect("run should not propagate error for budget skip");
 
@@ -1158,11 +1158,11 @@ mod tests {
         }
 
         // Provider returns zero results
-        let mock = MockProvider::new(vec![], dummy_verdict("D3B"));
+        let mock = MockProvider::new(vec![], dummy_verdict("topic-3b"));
         let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock));
 
         let verdict = op
-            .run("D3B", None, 8.0, 10.0, &EmptyStore)
+            .run("topic-3b", None, 8.0, 10.0, &EmptyStore)
             .await
             .expect("run should succeed");
 
@@ -1205,16 +1205,16 @@ mod tests {
             }
         }
 
-        let expected = dummy_verdict("D3B");
+        let expected = dummy_verdict("topic-3b");
         let mock = MockProvider::new(vec![dummy_result()], expected.clone());
         let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock));
 
         let verdict = op
-            .run("D3B", None, 8.0, 10.0, &EmptyStore)
+            .run("topic-3b", None, 8.0, 10.0, &EmptyStore)
             .await
             .expect("run should succeed");
 
-        assert_eq!(verdict.decision_id, "D3B");
+        assert_eq!(verdict.decision_id, "topic-3b");
         assert_eq!(verdict.status, VerdictStatus::Confirmed);
     }
 
@@ -1245,15 +1245,15 @@ mod tests {
 
         // MockProvider's plan() returns None (default impl), so operator falls
         // back to keyword query. Verify the pipeline still works end-to-end.
-        let mock = MockProvider::new(vec![dummy_result()], dummy_verdict("D3B"));
+        let mock = MockProvider::new(vec![dummy_result()], dummy_verdict("topic-3b"));
         let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock));
 
         let verdict = op
-            .run("D3B", Some(VerdictStatus::Challenged), 8.0, 10.0, &EmptyStore)
+            .run("topic-3b", Some(VerdictStatus::Challenged), 8.0, 10.0, &EmptyStore)
             .await
             .expect("run should succeed with plan fallback");
 
-        assert_eq!(verdict.decision_id, "D3B");
+        assert_eq!(verdict.decision_id, "topic-3b");
         assert_eq!(verdict.status, VerdictStatus::Confirmed);
     }
 
@@ -1263,13 +1263,13 @@ mod tests {
 
     #[tokio::test]
     async fn research_operator_returns_results_json() {
-        let mock = MockProvider::new(vec![dummy_result()], dummy_verdict("D3B"));
+        let mock = MockProvider::new(vec![dummy_result()], dummy_verdict("topic-3b"));
         let op = ResearchOperator::new(Box::new(mock), SweepOperatorConfig::default());
 
         let mut input = OperatorInput::new(Content::text("test query"), TriggerType::Task);
         input.metadata = serde_json::json!({
             "processor": "base",
-            "decision_id": "D3B",
+            "decision_id": "topic-3b",
         });
 
         let output = op.execute(input).await.expect("execute should succeed");
@@ -1282,13 +1282,13 @@ mod tests {
 
     #[tokio::test]
     async fn research_operator_declares_write_memory_effects() {
-        let mock = MockProvider::new(vec![dummy_result(), dummy_result()], dummy_verdict("D3B"));
+        let mock = MockProvider::new(vec![dummy_result(), dummy_result()], dummy_verdict("topic-3b"));
         let op = ResearchOperator::new(Box::new(mock), SweepOperatorConfig::default());
 
         let mut input = OperatorInput::new(Content::text("test query"), TriggerType::Task);
         input.metadata = serde_json::json!({
             "processor": "base",
-            "decision_id": "D3B",
+            "decision_id": "topic-3b",
         });
 
         let output = op.execute(input).await.expect("execute should succeed");
@@ -1310,13 +1310,13 @@ mod tests {
 
     #[tokio::test]
     async fn research_operator_returns_no_effects_for_empty_results() {
-        let mock = MockProvider::new(vec![], dummy_verdict("D3B"));
+        let mock = MockProvider::new(vec![], dummy_verdict("topic-3b"));
         let op = ResearchOperator::new(Box::new(mock), SweepOperatorConfig::default());
 
         let mut input = OperatorInput::new(Content::text("test query"), TriggerType::Task);
         input.metadata = serde_json::json!({
             "processor": "base",
-            "decision_id": "D3B",
+            "decision_id": "topic-3b",
         });
 
         let output = op.execute(input).await.expect("execute should succeed");
@@ -1376,13 +1376,13 @@ mod tests {
 
     #[tokio::test]
     async fn compare_operator_returns_verdict_json() {
-        let expected = dummy_verdict("D3B");
+        let expected = dummy_verdict("topic-3b");
         let mock = MockProvider::new(vec![], expected.clone());
         let op = CompareOperator::new(Box::new(mock), SweepOperatorConfig::default());
 
         let research = serde_json::to_string(&vec![dummy_result()]).unwrap();
         let mut input = OperatorInput::new(Content::text(research), TriggerType::Task);
-        input.metadata = serde_json::json!({"decision_id": "D3B"});
+        input.metadata = serde_json::json!({"decision_id": "topic-3b"});
 
         let output = op.execute(input).await.expect("execute should succeed");
         let text = output.message.as_text().expect("output should be text");
@@ -1393,12 +1393,12 @@ mod tests {
 
     #[tokio::test]
     async fn compare_operator_declares_write_memory_effects() {
-        let mock = MockProvider::new(vec![], dummy_verdict("D3B"));
+        let mock = MockProvider::new(vec![], dummy_verdict("topic-3b"));
         let op = CompareOperator::new(Box::new(mock), SweepOperatorConfig::default());
 
         let research = serde_json::to_string(&vec![dummy_result()]).unwrap();
         let mut input = OperatorInput::new(Content::text(research), TriggerType::Task);
-        input.metadata = serde_json::json!({"decision_id": "D3B"});
+        input.metadata = serde_json::json!({"decision_id": "topic-3b"});
 
         let output = op.execute(input).await.expect("execute should succeed");
 
@@ -1426,7 +1426,7 @@ mod tests {
         // Verify delta key pattern.
         if let Effect::WriteMemory { key, .. } = &output.effects[1] {
             assert!(
-                key.starts_with("delta:D3B:"),
+                key.starts_with("delta:topic-3b:"),
                 "second effect should be a delta key, got: {key}"
             );
         }

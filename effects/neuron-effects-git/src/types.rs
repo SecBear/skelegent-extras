@@ -44,7 +44,7 @@ pub enum PrAction {
 /// Record of PR activity for a single decision in a sweep cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrActivity {
-    /// The decision identifier (e.g. `"D3B"`).
+    /// The decision identifier (e.g. `"topic-3b"`).
     pub decision_id: String,
     /// What action was taken.
     pub action: PrAction,
@@ -170,12 +170,12 @@ mod tests {
         let digest = DailyDigest {
             date: "2026-03-04".to_string(),
             sweeps: vec![DigestEntry {
-                decision_id: "D3B".to_string(),
+                decision_id: "topic-3b".to_string(),
                 verdict: VerdictStatus::Confirmed,
                 summary: "Confirmed with strong evidence.".to_string(),
             }],
             pr_activity: vec![PrActivity {
-                decision_id: "D3B".to_string(),
+                decision_id: "topic-3b".to_string(),
                 action: PrAction::AutoMerged,
                 pr_url: None,
             }],

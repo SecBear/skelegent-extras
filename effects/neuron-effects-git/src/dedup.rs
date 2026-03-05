@@ -99,7 +99,7 @@ mod tests {
 
     fn make_verdict(narrative: &str, evidence_urls: &[&str]) -> SweepVerdict {
         SweepVerdict {
-            decision_id: "D3B".to_string(),
+            decision_id: "topic-3b".to_string(),
             status: VerdictStatus::Refined,
             confidence: 0.8,
             num_supporting: evidence_urls.len(),

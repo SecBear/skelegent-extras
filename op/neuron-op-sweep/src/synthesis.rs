@@ -299,7 +299,7 @@ mod tests {
         CandidateDecision {
             candidate_id: "candidate-L8".to_string(),
             title: "Test Candidate".to_string(),
-            related_decisions: vec!["D3B".to_string()],
+            related_decisions: vec!["topic-3b".to_string()],
             evidence: "Initial evidence.".to_string(),
             observation_count,
             sources: vec!["https://example.com".to_string()],
@@ -379,7 +379,7 @@ mod tests {
         let report = SynthesisReport {
             structural_changes: vec![StructuralChange {
                 change_type: StructuralChangeType::Convergence,
-                decision_ids: vec!["D1A".to_string(), "D3B".to_string()],
+                decision_ids: vec!["topic-1a".to_string(), "topic-3b".to_string()],
                 summary: "Two decisions converging on async runtime model".to_string(),
                 evidence: "Both reference tokio runtime primitives.".to_string(),
                 observation_count: 2,
@@ -387,11 +387,11 @@ mod tests {
             }],
             candidates: vec![make_candidate(CandidateStage::Observed, 1)],
             relationship_updates: vec![RelationshipUpdate {
-                from_decision: "D1A".to_string(),
-                to_decision: "D3B".to_string(),
+                from_decision: "topic-1a".to_string(),
+                to_decision: "topic-3b".to_string(),
                 relationship: RelationshipKind::DependsOn,
                 action: RelationshipAction::Add,
-                evidence: "D1A runtime relies on D3B crash recovery guarantees.".to_string(),
+                evidence: "topic-1a runtime relies on topic-3b crash recovery guarantees.".to_string(),
             }],
             health_summary: "Framework stable.".to_string(),
             cost_usd: 0.08,

@@ -134,7 +134,7 @@ mod tests {
     #[tokio::test]
     async fn mock_find_open_pr_returns_none_by_default() {
         let client = MockGitHubClient::default();
-        let result = client.find_open_pr("D3B").await.unwrap();
+        let result = client.find_open_pr("topic-3b").await.unwrap();
         assert!(result.is_none());
     }
 
@@ -151,7 +151,7 @@ mod tests {
             open_pr: Some(pr.clone()),
             ..Default::default()
         };
-        let result = client.find_open_pr("D3B").await.unwrap();
+        let result = client.find_open_pr("topic-3b").await.unwrap();
         assert!(result.is_some());
         let got = result.unwrap();
         assert_eq!(got.number, 42);
@@ -164,7 +164,7 @@ mod tests {
             find_error: Some(GitError::ApiError("500".to_string())),
             ..Default::default()
         };
-        let result = client.find_open_pr("D3B").await;
+        let result = client.find_open_pr("topic-3b").await;
         assert!(result.is_err());
     }
 

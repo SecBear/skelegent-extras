@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn cycle_report_serde_round_trip() {
         let report = CycleReport {
-            verdicts: vec![confirmed_verdict("D1", 0.10)],
+            verdicts: vec![confirmed_verdict("topic-1", 0.10)],
             budget: fresh_budget(),
             all_swept: true,
             started_at: "2026-03-04T18:00:00Z".to_string(),
@@ -305,7 +305,7 @@ mod tests {
         let json = serde_json::to_string(&report).expect("serialize");
         let back: CycleReport = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.verdicts.len(), 1);
-        assert_eq!(back.verdicts[0].decision_id, "D1");
+        assert_eq!(back.verdicts[0].decision_id, "topic-1");
         assert!(back.all_swept);
         assert!((back.total_cost_usd - 0.10).abs() < f64::EPSILON);
     }
@@ -341,11 +341,11 @@ mod tests {
         let budget = fresh_budget();
 
         let decisions = vec![
-            make_decision("D1", 0.9),
-            make_decision("D2", 0.7),
-            make_decision("D3", 0.5),
-            make_decision("D4", 0.4),
-            make_decision("D5", 0.2),
+            make_decision("topic-1", 0.9),
+            make_decision("topic-2", 0.7),
+            make_decision("topic-3", 0.5),
+            make_decision("topic-4", 0.4),
+            make_decision("topic-5", 0.2),
         ];
 
         let report = run_cycle(&config, budget, decisions, mock_operator(0.10)).await;
@@ -401,7 +401,7 @@ mod tests {
             last_costs: HashMap::new(),
         };
 
-        let decisions = vec![make_decision("D1", 0.9), make_decision("D2", 0.5)];
+        let decisions = vec![make_decision("topic-1", 0.9), make_decision("topic-2", 0.5)];
         let report = run_cycle(&config, budget, decisions, mock_operator(0.10)).await;
 
         assert_eq!(report.verdicts.len(), 0, "HardStop must dispatch nothing");
@@ -470,7 +470,7 @@ mod tests {
             last_costs: HashMap::new(), // no history → estimate_cost defaults to 0.30
         };
 
-        let decisions = vec![make_decision("D1", 0.9)];
+        let decisions = vec![make_decision("topic-1", 0.9)];
         let report = run_cycle(&config, budget, decisions, mock_operator(0.10)).await;
 
         assert_eq!(

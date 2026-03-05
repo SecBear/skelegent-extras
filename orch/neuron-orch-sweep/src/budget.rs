@@ -228,22 +228,22 @@ mod tests {
     #[test]
     fn estimate_cost_returns_default_when_no_history() {
         let s = state(0.0);
-        assert!((s.estimate_cost("D3B") - 0.30).abs() < f64::EPSILON);
+        assert!((s.estimate_cost("topic-3b") - 0.30).abs() < f64::EPSILON);
     }
 
     #[test]
     fn estimate_cost_returns_known_value_from_history() {
         let mut s = state(0.0);
-        s.last_costs.insert("D1A".to_string(), 0.55);
-        assert!((s.estimate_cost("D1A") - 0.55).abs() < f64::EPSILON);
+        s.last_costs.insert("topic-1a".to_string(), 0.55);
+        assert!((s.estimate_cost("topic-1a") - 0.55).abs() < f64::EPSILON);
     }
 
     #[test]
     fn estimate_cost_falls_back_for_unknown_id() {
         let mut s = state(0.0);
-        s.last_costs.insert("D1A".to_string(), 0.55);
-        // D3B was never recorded
-        assert!((s.estimate_cost("D3B") - 0.30).abs() < f64::EPSILON);
+        s.last_costs.insert("topic-1a".to_string(), 0.55);
+        // topic-3b was never recorded
+        assert!((s.estimate_cost("topic-3b") - 0.30).abs() < f64::EPSILON);
     }
 
     // -----------------------------------------------------------------------
@@ -289,12 +289,12 @@ mod tests {
     #[test]
     fn budget_state_serde_round_trip() {
         let mut s = state(4.5);
-        s.last_costs.insert("D1A".to_string(), 0.25);
+        s.last_costs.insert("topic-1a".to_string(), 0.25);
         let json = serde_json::to_string(&s).expect("serialize");
         let back: BudgetState = serde_json::from_str(&json).expect("deserialize");
         assert!((back.daily_total_usd - s.daily_total_usd).abs() < f64::EPSILON);
         assert_eq!(back.date, s.date);
-        assert!((back.last_costs["D1A"] - 0.25).abs() < f64::EPSILON);
+        assert!((back.last_costs["topic-1a"] - 0.25).abs() < f64::EPSILON);
     }
 
     #[test]
