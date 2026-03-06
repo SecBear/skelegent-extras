@@ -5,8 +5,6 @@
 //! uses [`MockProvider`].
 
 use crate::types::{ProcessorTier, VerdictStatus};
-#[cfg(test)]
-use crate::types::SweepVerdict;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -61,18 +59,14 @@ impl SweepError {
 
 /// Abstraction over a research backend (e.g. Parallel.ai).
 ///
-/// Implementations are responsible for:
-/// - Executing web research queries against the configured backend.
-/// - Calling an LLM to compare research findings against a decision.
-///
-/// The separation of `search` and `compare` allows independent testing
-/// of each step and future replacement of either backend.
+/// Implementations handle web research queries against the configured backend.
+/// LLM comparison is handled separately by [`crate::operator::CompareOperator`].
 #[async_trait]
 pub trait ResearchProvider: Send + Sync {
     /// Execute a research query and return matching results.
     ///
     /// The `processor` hint controls which model tier the backend uses.
-    /// Callers SHOULD use [`crate::operator::SweepOperator::select_processor`]
+    /// Callers SHOULD use [`crate::operator::select_processor`]
     /// to choose the tier based on budget and previous verdict.
     ///
     /// # Errors
@@ -142,29 +136,22 @@ pub struct MockProvider {
     call_count: std::sync::Mutex<usize>,
     /// Results returned after the failure window has passed.
     results: Vec<ResearchResult>,
-    /// Retained for constructor compatibility; unused after compare() removal.
-    compare_response: SweepVerdict,
 }
 
 #[cfg(test)]
 impl MockProvider {
     /// Create a provider that always succeeds immediately.
-    pub fn new(results: Vec<ResearchResult>, compare_response: SweepVerdict) -> Self {
-        Self::new_failing(0, results, compare_response)
+    pub fn new(results: Vec<ResearchResult>) -> Self {
+        Self::new_failing(0, results)
     }
 
     /// Create a provider that returns transient errors for the first
     /// `fail_count` search calls, then succeeds.
-    pub fn new_failing(
-        fail_count: usize,
-        results: Vec<ResearchResult>,
-        compare_response: SweepVerdict,
-    ) -> Self {
+    pub fn new_failing(fail_count: usize, results: Vec<ResearchResult>) -> Self {
         Self {
             fail_count,
             call_count: std::sync::Mutex::new(0),
             results,
-            compare_response,
         }
     }
 }
@@ -198,25 +185,7 @@ impl ResearchProvider for MockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{EvidenceStance, VerdictStatus};
-
-    fn dummy_verdict(decision_id: &str) -> SweepVerdict {
-        SweepVerdict {
-            decision_id: decision_id.to_string(),
-            status: VerdictStatus::Confirmed,
-            confidence: 0.9,
-            num_supporting: 3,
-            num_contradicting: 0,
-            cost_usd: 0.10,
-            processor: crate::types::ProcessorTier::Base,
-            duration_secs: 2.0,
-            swept_at: "2026-03-04T18:00:00Z".to_string(),
-            evidence: vec![],
-            narrative: "Confirmed by mock".to_string(),
-            proposed_diff: None,
-        }
-    }
-
+    use crate::types::EvidenceStance;
     fn dummy_result() -> ResearchResult {
         ResearchResult {
             url: "https://example.com".to_string(),
@@ -229,7 +198,7 @@ mod tests {
     #[tokio::test]
     async fn mock_provider_returns_configured_results() {
         let expected = vec![dummy_result()];
-        let provider = MockProvider::new(expected.clone(), dummy_verdict("test"));
+        let provider = MockProvider::new(expected.clone());
         let results = provider
             .search("query", ProcessorTier::Base)
             .await
@@ -242,7 +211,7 @@ mod tests {
     #[tokio::test]
     async fn mock_provider_fails_first_n_then_succeeds() {
         let results = vec![dummy_result()];
-        let provider = MockProvider::new_failing(2, results.clone(), dummy_verdict("test"));
+        let provider = MockProvider::new_failing(2, results.clone());
 
         // First two calls fail with Transient
         let e1 = provider.search("q", ProcessorTier::Base).await.unwrap_err();
@@ -309,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_provider_plan_returns_none_by_default() {
-        let mock = MockProvider::new(vec![], dummy_verdict("test"));
+        let mock = MockProvider::new(vec![]);
         let result = mock
             .plan("topic-3b", "some decision text", Some(&VerdictStatus::Challenged))
             .await
@@ -320,7 +289,7 @@ mod tests {
     #[tokio::test]
     async fn research_delegates_to_search_by_default() {
         let expected = vec![dummy_result()];
-        let provider = MockProvider::new(expected.clone(), dummy_verdict("test"));
+        let provider = MockProvider::new(expected.clone());
         let results = provider
             .research("query", ProcessorTier::Base)
             .await
@@ -331,7 +300,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_returns_none_by_default() {
-        let provider = MockProvider::new(vec![], dummy_verdict("test"));
+        let provider = MockProvider::new(vec![]);
         let result = provider
             .extract("https://example.com")
             .await

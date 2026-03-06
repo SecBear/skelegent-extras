@@ -7,20 +7,15 @@
 //!
 //! # Pipeline
 //!
-//! [`SweepOperator::run`] executes an 8-step pipeline per decision:
+//! [`run_sweep`] sequences [`ResearchOperator`] and [`CompareOperator`] through
+//! an [`layer0::Orchestrator`], respecting the effects boundary. The pipeline:
 //!
-//! 1. **Dedup check** — skip if swept too recently.
-//! 2. **Query plan** — build research queries.
-//! 3. **Context assembly** — assemble packed context from state store.
-//! 4. **Research** — execute queries via [`ResearchProvider`] with retry.
-//! 5. **Artifact storage** — persist raw results (requires write access).
-//! 6. **Compare** — LLM comparison of research against the decision.
-//! 7. **State update** — write delta, card, and sweep metadata.
-//! 8. **Emit** — return the structured [`SweepVerdict`].
-//!
-//! Alternatively, use [`run_sweep`] with [`ResearchOperator`] and
-//! [`CompareOperator`] dispatched through an [`layer0::Orchestrator`] to
-//! respect the effects boundary.
+//! 1. **Dedup check** — skip if swept too recently (read-only).
+//! 2. **Budget guard** — return Skipped if no budget.
+//! 3. **Processor selection** — choose tier from budget ratio and previous verdict.
+//! 4. **Research dispatch** — [`ResearchOperator`] via the orchestrator.
+//! 5. **Compare dispatch** — [`CompareOperator`] via the orchestrator.
+//! 6. **Emit** — parse and return the final [`SweepVerdict`].
 //!
 //! # Design
 //!
@@ -28,16 +23,19 @@
 //! No HTTP calls are made inside this crate; callers supply a concrete
 //! implementation (Parallel.ai, mock, etc.).
 //!
+//! [`CompareOperator`] is generic over [`neuron_turn::provider::Provider`] —
+//! any LLM backend (Anthropic, OpenAI, Ollama) can be wired in.
+//!
 //! # Example
 //!
 //! ```no_run
-//! use neuron_op_sweep::{SweepOperator, SweepOperatorConfig, ResearchProvider};
-//! use neuron_op_sweep::{ResearchResult, SweepVerdict, SweepError};
+//! use neuron_op_sweep::{ResearchOperator, CompareOperator, SweepOperatorConfig};
+//! use neuron_op_sweep::{ResearchProvider, run_sweep};
 //! use neuron_op_sweep::types::{ProcessorTier, VerdictStatus};
 //!
-//! // Implement ResearchProvider for your backend, then:
-//! // let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(your_provider));
-//! // let verdict = op.run("topic-3b", None, 8.0, 10.0, &store).await?;
+//! // 1. Create operators with your research and LLM providers.
+//! // 2. Register them on a LocalOrchestrator.
+//! // 3. Call run_sweep(&orch, &research_id, &compare_id, ...).await
 //! ```
 
 pub mod cost;

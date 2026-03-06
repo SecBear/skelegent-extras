@@ -387,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn run_sweep_returns_skipped_when_budget_is_zero() {
         let (orch, research_id, compare_id) = build_orch(
-            MockProvider::new(vec![dummy_result()], dummy_verdict("topic-3b")),
+            MockProvider::new(vec![dummy_result()]),
             dummy_verdict("topic-3b"),
         );
 
@@ -412,7 +412,7 @@ mod tests {
     async fn run_sweep_returns_confirmed_low_confidence_on_no_results() {
         // Research operator returns empty results → workflow returns Confirmed(0.3).
         let (orch, research_id, compare_id) = build_orch(
-            MockProvider::new(vec![], dummy_verdict("topic-3b")),
+            MockProvider::new(vec![]),
             dummy_verdict("topic-3b"),
         );
 
@@ -443,7 +443,7 @@ mod tests {
         // Full happy-path: research finds results, compare produces a verdict.
         let expected = dummy_verdict("topic-3b");
         let (orch, research_id, compare_id) = build_orch(
-            MockProvider::new(vec![dummy_result()], dummy_verdict("topic-3b")),
+            MockProvider::new(vec![dummy_result()]),
             expected.clone(),
         );
 
@@ -482,7 +482,7 @@ mod tests {
         let mut orch = LocalOrchestrator::new();
         orch.register(
             research_id.clone(),
-            Arc::new(ResearchOperator::new(Box::new(MockProvider::new(vec![], dummy_verdict("topic-3b"))), SweepOperatorConfig::default())),
+            Arc::new(ResearchOperator::new(Box::new(MockProvider::new(vec![])), SweepOperatorConfig::default())),
         );
         orch.register(
             compare_id.clone(),

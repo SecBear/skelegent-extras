@@ -13,9 +13,12 @@ use layer0::effect::Scope;
 use layer0::error::StateError;
 use layer0::state::{SearchResult, StateStore, StoreOptions};
 use neuron_effects_git::{PrAction, route_verdict};
+use layer0::id::AgentId;
+use layer0::test_utils::LocalOrchestrator;
 use neuron_op_sweep::{
-    EvidenceItem, EvidenceStance, ProcessorTier, ResearchProvider, ResearchResult, SweepError,
-    SweepOperator, SweepOperatorConfig, SweepVerdict, VerdictStatus,
+    CompareOperator, EvidenceItem, EvidenceStance, ProcessorTier, ResearchOperator,
+    ResearchProvider, ResearchResult, SweepError, SweepOperatorConfig, SweepVerdict,
+    VerdictStatus, run_sweep,
 };
 use neuron_orch_sweep::{
     BudgetConfig, BudgetState, CycleReport, OrchestratorConfig, QueuedDecision, run_cycle,
@@ -210,7 +213,7 @@ async fn smoke_full_cycle_with_three_decisions() {
         },
     ];
 
-    // Build the operator closure that uses real SweepOperator + TestProvider + RecordingStore
+    // Build the operator closure using run_sweep + Orchestrator (idiomatic pipeline).
     let store_clone = Arc::clone(&store);
     let operator =
         move |id: String,
@@ -218,15 +221,16 @@ async fn smoke_full_cycle_with_three_decisions() {
               -> Pin<Box<dyn std::future::Future<Output = SweepVerdict> + Send + 'static>> {
             let s = Arc::clone(&store_clone);
             Box::pin(async move {
-                let op = SweepOperator::new(
-                    SweepOperatorConfig {
-                        min_sweep_interval: Duration::from_secs(0),
-                        ..SweepOperatorConfig::default()
-                    },
-                    Box::new(TestProvider),
-                    TestLlm,
-                );
-                op.run(&id, prev, 8.0, 10.0, s.as_ref())
+                let mut orch = LocalOrchestrator::new();
+                let research_id = AgentId::new("research");
+                let compare_id = AgentId::new("compare");
+                let cfg = SweepOperatorConfig {
+                    min_sweep_interval: Duration::from_secs(0),
+                    ..SweepOperatorConfig::default()
+                };
+                orch.register(research_id.clone(), Arc::new(ResearchOperator::new(Box::new(TestProvider), cfg.clone())));
+                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, cfg)));
+                run_sweep(&orch, &research_id, &compare_id, &id, prev, 8.0, 10.0, s.as_ref())
                     .await
                     .unwrap_or_else(|e| panic!("operator failed for {id}: {e}"))
             })
@@ -274,49 +278,11 @@ async fn smoke_full_cycle_with_three_decisions() {
         }
     }
 
-    // Verify the RecordingStore captured writes from steps 5 and 7
-    let writes = store.writes.lock().await;
-    assert!(
-        !writes.is_empty(),
-        "StateStore should have received writes from steps 5 and 7"
-    );
-
-    // Check for artifact writes (step 5)
-    let artifact_writes: Vec<_> = writes
-        .iter()
-        .filter(|(k, _)| k.starts_with("artifact:"))
-        .collect();
-    assert!(
-        !artifact_writes.is_empty(),
-        "step 5 should have stored research artifacts"
-    );
-
-    // Check for metadata writes (step 7)
-    let meta_writes: Vec<_> = writes
-        .iter()
-        .filter(|(k, _)| k.starts_with("meta:"))
-        .collect();
-    assert!(
-        !meta_writes.is_empty(),
-        "step 7 should have stored sweep metadata"
-    );
-
-    // Check for delta writes (step 7)
-    let delta_writes: Vec<_> = writes
-        .iter()
-        .filter(|(k, _)| k.starts_with("delta:"))
-        .collect();
-    assert!(
-        !delta_writes.is_empty(),
-        "step 7 should have stored delta summaries"
-    );
-
-    // 3 decisions × (1 artifact + 1 meta + 1 delta) = at least 9 writes
-    assert!(
-        writes.len() >= 9,
-        "expected at least 9 writes (3 decisions × 3 write types), got {}",
-        writes.len()
-    );
+    // Note: The idiomatic pipeline (run_sweep + LocalOrchestrator) returns
+    // WriteMemory effects in OperatorOutput but does NOT execute them —
+    // effect interpretation is an orchestrator concern. The RecordingStore
+    // receives no writes. Effect execution is tested separately via
+    // OrchestratedRunner + EffectInterpreter in the kit crate.
 }
 
 #[tokio::test]
@@ -353,8 +319,13 @@ async fn smoke_budget_exhaustion_stops_cycle() {
               -> Pin<Box<dyn std::future::Future<Output = SweepVerdict> + Send + 'static>> {
             let s = Arc::clone(&store_clone);
             Box::pin(async move {
-                let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(TestProvider), TestLlm);
-                op.run(&id, prev, 0.004, 0.10, s.as_ref())
+                let mut orch = LocalOrchestrator::new();
+                let research_id = AgentId::new("research");
+                let compare_id = AgentId::new("compare");
+                let cfg = SweepOperatorConfig::default();
+                orch.register(research_id.clone(), Arc::new(ResearchOperator::new(Box::new(TestProvider), cfg.clone())));
+                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, cfg)));
+                run_sweep(&orch, &research_id, &compare_id, &id, prev, 0.004, 0.10, s.as_ref())
                     .await
                     .unwrap_or_else(|e| panic!("operator failed: {e}"))
             })
