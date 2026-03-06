@@ -1,0 +1,21 @@
+[package]
+name = "neuron-auth-pi"
+version = "0.4.0"
+edition.workspace = true
+rust-version = "1.85"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "AuthProvider reading from ~/.pi/agent/auth.json with automatic OAuth token refresh"
+
+[dependencies]
+neuron-auth = { path = "../../../neuron/auth/neuron-auth", version = "0.4.0" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"

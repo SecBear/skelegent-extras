@@ -8,6 +8,8 @@ members = [
   "state/neuron-state-cozo",
   "effects/neuron-effects-git",
   "auth/neuron-auth-oauth",
+  "auth/neuron-auth-pi",
+  "auth/neuron-auth-omp",
 ]
 
 [workspace.package]
