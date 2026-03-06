@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "op/neuron-op-sweep",
   "orch/neuron-orch-sweep",
+  "orch/neuron-orch-kit",
   "orch/neuron-orch-temporal",
   "state/neuron-state-sqlite",
   "state/neuron-state-cozo",
