@@ -234,11 +234,12 @@ impl AuthProvider for PiAuthProvider {
     /// Provide a token by reading (and if necessary refreshing) `auth.json`.
     ///
     /// Audience routing:
-    /// - `"api.anthropic.com"` → key `"anthropic"`
-    /// - `"api.openai.com"` / `"openai"` → key `"openai-codex"`
+    /// - `"api.anthropic.com"` / `"anthropic"` → key `"anthropic"`
+    /// - `"api.openai.com"` / `"openai"`     → key `"openai-codex"`
     ///
-    /// Returns [`AuthError::ScopeUnavailable`] for unrecognised audiences so
-    /// that the next provider in the chain can handle it.
+    /// Parallel.ai uses a static API key — set `PARALLEL_API_KEY` env var.
+    /// Returns [`AuthError::ScopeUnavailable`] for all other audiences so
+    /// the chain continues to the next provider.
     async fn provide(&self, request: &AuthRequest) -> Result<AuthToken, AuthError> {
         let audience = request.audience.as_deref().unwrap_or("");
 
