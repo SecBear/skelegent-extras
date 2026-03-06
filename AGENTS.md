@@ -12,7 +12,7 @@ model). Each crate wraps one external system behind a neuron trait.
 | `orch/`   | `sweep`, `temporal` | Orchestration backends          |
 | `state/`  | `sqlite`, `cozo`    | State-store implementations     |
 | `effects/`| `git`          | Git effects                          |
-| `auth/`   | `oauth`        | OAuth provider                       |
+| `auth/`   | `neuron-auth-oauth`, `neuron-auth-pi`, `neuron-auth-omp` | Auth providers (OAuth Device Flow, pi OAuth, OMP SQLite) |
 
 ## Build Commands
 
