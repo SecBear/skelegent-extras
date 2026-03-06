@@ -189,7 +189,7 @@ fn extract_json_block(raw: &str) -> &str {
 
 /// Operator that compares research findings against a decision via an LLM [`Provider`].
 ///
-/// Context assembly is **turn-owned** (per D2A–D2E): the operator reads the
+/// Context assembly is **turn-owned**: the operator reads the
 /// decision card and prior sweep deltas from the state store during `execute()`,
 /// then combines them with the research results supplied in the input message.
 ///

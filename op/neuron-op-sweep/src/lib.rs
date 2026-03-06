@@ -1,9 +1,9 @@
 #![deny(missing_docs)]
-//! Sweep operator for the Golden Sweep System.
+//! Sweep operator for architectural decision auditing.
 //!
-//! This crate implements Component 4 of the Golden Sweep System: a per-decision
-//! sweep agent that compares research findings against the current golden
-//! decision, and produces a structured [`SweepVerdict`].
+//! This crate implements a per-decision sweep agent that compares research
+//! findings against the current decision position, and produces a structured
+//! [`SweepVerdict`].
 //!
 //! # Pipeline
 //!

@@ -1,8 +1,7 @@
 //! Synthesis agent types and helper logic for cross-decision structural analysis.
 //!
-//! Implements Component 6 of the Golden Sweep System: a two-pass analysis that
-//! detects structural shifts, contradictions, emergent patterns, and candidate
-//! decisions after each full sweep cycle.
+//! Implements a two-pass analysis that detects structural shifts, contradictions,
+//! emergent patterns, and candidate decisions after each full sweep cycle.
 //!
 //! # Two-Pass Architecture
 //!

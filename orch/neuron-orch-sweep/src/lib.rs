@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
-//! Sweep orchestrator for the Golden Sweep System.
+//! Sweep orchestrator for architectural decision auditing.
 //!
-//! This crate implements Component 5: priority scheduling, daily budget
+//! This crate provides priority scheduling, daily budget
 //! enforcement, and sweep-cycle management.  It is intentionally free of
 //! scheduling (cron/timers); callers are responsible for invoking
 //! [`cycle::run_cycle`] on their preferred cadence.
