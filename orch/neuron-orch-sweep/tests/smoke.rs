@@ -20,6 +20,8 @@ use neuron_op_sweep::{
 use neuron_orch_sweep::{
     BudgetConfig, BudgetState, CycleReport, OrchestratorConfig, QueuedDecision, run_cycle,
 };
+use neuron_turn::provider::{Provider, ProviderError};
+use neuron_turn::types::{ContentPart, ProviderRequest, ProviderResponse, StopReason, TokenUsage};
 use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -86,29 +88,45 @@ impl ResearchProvider for TestProvider {
         }])
     }
 
-    async fn compare(
+}
+
+// ---------------------------------------------------------------------------
+// Test LLM — produces compare verdicts based on decision ID in the request
+// ---------------------------------------------------------------------------
+
+struct TestLlm;
+
+impl Provider for TestLlm {
+    fn complete(
         &self,
-        _system: &str,
-        _context: &str,
-        _research: &str,
-        current_decision: &str,
-    ) -> Result<SweepVerdict, SweepError> {
-        // Return different verdicts based on decision ID to test routing
-        let (status, confidence) = if current_decision.contains("STALE") {
+        req: ProviderRequest,
+    ) -> impl std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send {
+        // CompareOperator formats: "Decision ID: {id}\n\n<research>..."
+        let decision_id = req
+            .messages
+            .first()
+            .and_then(|m| m.content.first())
+            .and_then(|c| {
+                if let ContentPart::Text { text } = c {
+                    text.strip_prefix("Decision ID: ")
+                        .and_then(|s| s.split('\n').next())
+                        .map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        let (status, confidence) = if decision_id.contains("STALE") {
             (VerdictStatus::Challenged, 0.7)
-        } else if current_decision.contains("UPDATE") {
+        } else if decision_id.contains("UPDATE") {
             (VerdictStatus::Refined, 0.8)
         } else {
             (VerdictStatus::Confirmed, 0.95)
         };
-        let num_contradicting = if status == VerdictStatus::Challenged {
-            2
-        } else {
-            0
-        };
-
-        Ok(SweepVerdict {
-            decision_id: current_decision.to_string(),
+        let num_contradicting = if status == VerdictStatus::Challenged { 2 } else { 0 };
+        let verdict = SweepVerdict {
+            decision_id: decision_id.clone(),
             status,
             confidence,
             num_supporting: 3,
@@ -125,7 +143,18 @@ impl ResearchProvider for TestProvider {
             }],
             narrative: "Test narrative".into(),
             proposed_diff: None,
-        })
+        };
+        let json = serde_json::to_string(&verdict).expect("serialize verdict");
+        async move {
+            Ok(ProviderResponse {
+                content: vec![ContentPart::Text { text: json }],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+                model: "mock".into(),
+                cost: None,
+                truncated: None,
+            })
+        }
     }
 }
 
@@ -195,6 +224,7 @@ async fn smoke_full_cycle_with_three_decisions() {
                         ..SweepOperatorConfig::default()
                     },
                     Box::new(TestProvider),
+                    TestLlm,
                 );
                 op.run(&id, prev, 8.0, 10.0, s.as_ref())
                     .await
@@ -323,7 +353,7 @@ async fn smoke_budget_exhaustion_stops_cycle() {
               -> Pin<Box<dyn std::future::Future<Output = SweepVerdict> + Send + 'static>> {
             let s = Arc::clone(&store_clone);
             Box::pin(async move {
-                let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(TestProvider));
+                let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(TestProvider), TestLlm);
                 op.run(&id, prev, 0.004, 0.10, s.as_ref())
                     .await
                     .unwrap_or_else(|e| panic!("operator failed: {e}"))
