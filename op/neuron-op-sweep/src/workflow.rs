@@ -21,7 +21,7 @@ use std::time::Instant;
 use layer0::operator::TriggerType;
 use layer0::{AgentId, Content, OperatorInput, Orchestrator, Scope, StateStore};
 
-use crate::operator::{StoreAsReader, SweepOperator, COMPARISON_SYSTEM_PROMPT};
+use crate::operator::{StoreAsReader, COMPARISON_SYSTEM_PROMPT};
 use crate::provider::{ResearchResult, SweepError};
 use crate::types::{ProcessorTier, SweepMeta, SweepVerdict, VerdictStatus};
 
@@ -122,7 +122,7 @@ pub async fn run_sweep(
     // Step 3: PROCESSOR SELECTION + CONTEXT ASSEMBLY
     // ------------------------------------------------------------------
     let processor =
-        SweepOperator::select_processor(budget_remaining_usd, budget_total_usd, previous_verdict.as_ref());
+        crate::operator::select_processor(budget_remaining_usd, budget_total_usd, previous_verdict.as_ref());
 
     // Read the decision card for keyword query generation (read-only).
     let card_key = format!("card:{decision_id}");
@@ -144,7 +144,7 @@ pub async fn run_sweep(
     // ------------------------------------------------------------------
     // Step 4: BUILD QUERY (keyword in v1; plan-first in v2)
     // ------------------------------------------------------------------
-    let query = SweepOperator::keyword_query(&card_text);
+    let query = crate::operator::keyword_query(&card_text);
 
     // Encode processor tier as JSON string for metadata.
     let processor_json = serde_json::to_value(&processor).unwrap_or(serde_json::json!("base"));
@@ -269,6 +269,8 @@ mod tests {
     use layer0::error::StateError;
     use layer0::state::{SearchResult, StateStore};
     use layer0::test_utils::LocalOrchestrator;
+    use neuron_turn::provider::{Provider, ProviderError};
+    use neuron_turn::types::{ContentPart, ProviderRequest, ProviderResponse, StopReason, TokenUsage};
     use std::sync::Arc;
 
     // -----------------------------------------------------------------------
@@ -341,31 +343,40 @@ mod tests {
         }
     }
 
-    /// Build a `LocalOrchestrator` with a `ResearchOperator` and a `CompareOperator`
-    /// backed by the given mock providers.
+    /// Build a `LocalOrchestrator` with a `ResearchOperator` and a `CompareOperator`.
+    /// The compare operator uses a mock LLM that returns `compare_verdict` as JSON.
     fn build_orch(
         research_mock: MockProvider,
-        compare_mock: MockProvider,
+        compare_verdict: SweepVerdict,
     ) -> (LocalOrchestrator, AgentId, AgentId) {
+        struct MockLlm { verdict: SweepVerdict }
+        impl Provider for MockLlm {
+            fn complete(&self, _req: ProviderRequest)
+                -> impl std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send {
+                let json = serde_json::to_string(&self.verdict).expect("serialize");
+                async move {
+                    Ok(ProviderResponse {
+                        content: vec![ContentPart::Text { text: json }],
+                        stop_reason: StopReason::EndTurn,
+                        usage: TokenUsage::default(),
+                        model: "mock".into(),
+                        cost: None,
+                        truncated: None,
+                    })
+                }
+            }
+        }
         let research_id = AgentId::new("research");
         let compare_id = AgentId::new("compare");
-
         let mut orch = LocalOrchestrator::new();
         orch.register(
             research_id.clone(),
-            Arc::new(ResearchOperator::new(
-                Box::new(research_mock),
-                SweepOperatorConfig::default(),
-            )),
+            Arc::new(ResearchOperator::new(Box::new(research_mock), SweepOperatorConfig::default())),
         );
         orch.register(
             compare_id.clone(),
-            Arc::new(CompareOperator::new(
-                Box::new(compare_mock),
-                SweepOperatorConfig::default(),
-            )),
+            Arc::new(CompareOperator::new(MockLlm { verdict: compare_verdict }, SweepOperatorConfig::default())),
         );
-
         (orch, research_id, compare_id)
     }
 
@@ -377,7 +388,7 @@ mod tests {
     async fn run_sweep_returns_skipped_when_budget_is_zero() {
         let (orch, research_id, compare_id) = build_orch(
             MockProvider::new(vec![dummy_result()], dummy_verdict("topic-3b")),
-            MockProvider::new(vec![], dummy_verdict("topic-3b")),
+            dummy_verdict("topic-3b"),
         );
 
         let verdict = run_sweep(
@@ -402,7 +413,7 @@ mod tests {
         // Research operator returns empty results → workflow returns Confirmed(0.3).
         let (orch, research_id, compare_id) = build_orch(
             MockProvider::new(vec![], dummy_verdict("topic-3b")),
-            MockProvider::new(vec![], dummy_verdict("topic-3b")),
+            dummy_verdict("topic-3b"),
         );
 
         let verdict = run_sweep(
@@ -433,7 +444,7 @@ mod tests {
         let expected = dummy_verdict("topic-3b");
         let (orch, research_id, compare_id) = build_orch(
             MockProvider::new(vec![dummy_result()], dummy_verdict("topic-3b")),
-            MockProvider::new(vec![], expected.clone()),
+            expected.clone(),
         );
 
         let verdict = run_sweep(
@@ -459,45 +470,23 @@ mod tests {
     async fn run_sweep_sequences_research_before_compare() {
         // Verifies that compare is NOT called when research returns empty results.
         // CompareOperator uses a provider that panics if called.
-        struct PanicProvider;
-
-        #[async_trait::async_trait]
-        impl crate::provider::ResearchProvider for PanicProvider {
-            async fn search(
-                &self,
-                _query: &str,
-                _processor: ProcessorTier,
-            ) -> Result<Vec<crate::provider::ResearchResult>, SweepError> {
-                unreachable!("compare provider search should not be called")
-            }
-
-            async fn compare(
-                &self,
-                _system: &str,
-                _context: &str,
-                _research: &str,
-                _current_decision: &str,
-            ) -> Result<SweepVerdict, SweepError> {
-                panic!("compare should not be called when research returns empty results");
+        struct PanicLlm;
+        impl Provider for PanicLlm {
+            fn complete(&self, _req: ProviderRequest)
+                -> impl std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send {
+                async move { panic!("compare LLM should not be called when research returns empty") }
             }
         }
-
         let research_id = AgentId::new("research");
         let compare_id = AgentId::new("compare");
         let mut orch = LocalOrchestrator::new();
         orch.register(
             research_id.clone(),
-            Arc::new(ResearchOperator::new(
-                Box::new(MockProvider::new(vec![], dummy_verdict("topic-3b"))),
-                SweepOperatorConfig::default(),
-            )),
+            Arc::new(ResearchOperator::new(Box::new(MockProvider::new(vec![], dummy_verdict("topic-3b"))), SweepOperatorConfig::default())),
         );
         orch.register(
             compare_id.clone(),
-            Arc::new(CompareOperator::new(
-                Box::new(PanicProvider),
-                SweepOperatorConfig::default(),
-            )),
+            Arc::new(CompareOperator::new(PanicLlm, SweepOperatorConfig::default())),
         );
 
         let verdict = run_sweep(

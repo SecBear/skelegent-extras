@@ -1,8 +1,10 @@
-//! Production [`ResearchProvider`] composing Parallel.ai search and Anthropic LLM.
+//! Production [`ResearchProvider`] backed by Parallel.ai.
 //!
-//! `search()` calls Parallel.ai's search API (web research tool).
-//! `compare()` and `plan()` call Anthropic's Messages API (LLM reasoning).
+//! `search()` and `research()` call Parallel.ai's search and task APIs.
+//! `extract()` calls Parallel.ai's extract endpoint.
 //!
+//! LLM comparison is handled separately by wiring an `AnthropicProvider`
+//! (from `neuron-provider-anthropic`) into `CompareOperator` directly.
 //! See `rules/10-sweep-system-backends.md` for the design rationale.
 
 use async_trait::async_trait;
@@ -11,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::provider::{ResearchProvider, ResearchResult, SweepError};
-use crate::types::{ProcessorTier, SweepVerdict, VerdictStatus};
+use crate::types::ProcessorTier;
 
 // ---------------------------------------------------------------------------
 // Internal response types
@@ -21,52 +23,6 @@ use crate::types::{ProcessorTier, SweepVerdict, VerdictStatus};
 #[derive(Deserialize)]
 struct SearchResponse {
     results: Vec<ResearchResult>,
-}
-
-/// Anthropic Messages API request.
-#[derive(Serialize)]
-struct AnthropicRequest {
-    model: String,
-    max_tokens: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
-    messages: Vec<AnthropicMessage>,
-}
-
-/// Anthropic message.
-#[derive(Serialize)]
-struct AnthropicMessage {
-    role: String,
-    content: String,
-}
-
-/// Anthropic Messages API response (subset).
-#[derive(Deserialize)]
-struct AnthropicResponse {
-    content: Vec<AnthropicContentBlock>,
-    usage: AnthropicUsage,
-}
-
-/// Anthropic content block.
-#[derive(Deserialize)]
-struct AnthropicContentBlock {
-    #[serde(rename = "type")]
-    block_type: String,
-    #[serde(default)]
-    text: Option<String>,
-}
-
-/// Anthropic token usage.
-#[derive(Deserialize)]
-struct AnthropicUsage {
-    input_tokens: usize,
-    output_tokens: usize,
-}
-
-/// LLM response parsed as a plan.
-#[derive(Deserialize)]
-struct PlanResponse {
-    queries: Vec<String>,
 }
 
 /// Parallel.ai task run request.
@@ -114,19 +70,17 @@ struct ExtractResponse {
 // SweepProvider
 // ---------------------------------------------------------------------------
 
-/// Production [`ResearchProvider`] that composes two backends:
+/// Production [`ResearchProvider`] backed by Parallel.ai for search and
+/// evidence gathering.
 ///
-/// - **Parallel.ai** for `search()` — web research and evidence gathering.
-/// - **Anthropic Claude** for `compare()` and `plan()` — LLM reasoning.
-///
-/// API keys are resolved via an optional [`AuthProvider`] first, then fall
-/// back to environment variables at call time. Error messages contain only
-/// variable names, never key material.
+/// LLM comparison is decoupled: wire `AnthropicProvider::with_auth()` into
+/// [`crate::operator::CompareOperator`] instead of using this provider for
+/// that role.
 ///
 /// # Auth resolution order
 ///
 /// 1. If an `AuthProvider` is configured (via [`with_auth`](Self::with_auth)),
-///    call `provider.provide()` with the appropriate audience.
+///    call `provider.provide()` with audience `parallel.ai`.
 /// 2. If no `AuthProvider` or the provider returns an error, fall back to
 ///    the configured environment variable.
 ///
@@ -140,16 +94,6 @@ pub struct SweepProvider {
     parallel_key_var: String,
     /// Parallel.ai search endpoint.
     parallel_url: String,
-    /// Env var for Anthropic API key.
-    anthropic_key_var: String,
-    /// Anthropic Messages API endpoint.
-    anthropic_url: String,
-    /// Anthropic API version header.
-    anthropic_version: String,
-    /// Model to use for LLM calls (e.g. `claude-sonnet-4-20250514`).
-    model: String,
-    /// Max tokens for LLM responses.
-    max_tokens: usize,
     /// Parallel.ai task runs endpoint.
     parallel_task_url: String,
     /// Parallel.ai extract endpoint.
@@ -166,33 +110,20 @@ impl std::fmt::Debug for SweepProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SweepProvider")
             .field("parallel_url", &self.parallel_url)
-            .field("anthropic_url", &self.anthropic_url)
-            .field("model", &self.model)
             .field("auth", &self.auth.as_ref().map(|_| "[configured]"))
             .finish_non_exhaustive()
     }
 }
 
 impl SweepProvider {
-    /// Create a provider with default API endpoints.
+    /// Create a provider with default Parallel.ai endpoints.
     ///
     /// - `parallel_key_var`: env var holding the Parallel.ai API key.
-    /// - `anthropic_key_var`: env var holding the Anthropic API key.
-    /// - `model`: Anthropic model identifier.
-    pub fn new(
-        parallel_key_var: impl Into<String>,
-        anthropic_key_var: impl Into<String>,
-        model: impl Into<String>,
-    ) -> Self {
+    pub fn new(parallel_key_var: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             parallel_key_var: parallel_key_var.into(),
             parallel_url: "https://api.parallel.ai/v1/search".into(),
-            anthropic_key_var: anthropic_key_var.into(),
-            anthropic_url: "https://api.anthropic.com/v1/messages".into(),
-            anthropic_version: "2023-06-01".into(),
-            model: model.into(),
-            max_tokens: 4096,
             parallel_task_url: "https://api.parallel.ai/v1/tasks/runs".into(),
             parallel_extract_url: "https://api.parallel.ai/v1beta/extract".into(),
             max_poll_attempts: 30,
@@ -201,20 +132,9 @@ impl SweepProvider {
         }
     }
 
-    /// Override API endpoints (for testing or proxies).
-    pub fn with_urls(
-        mut self,
-        parallel_url: impl Into<String>,
-        anthropic_url: impl Into<String>,
-    ) -> Self {
-        self.parallel_url = parallel_url.into();
-        self.anthropic_url = anthropic_url.into();
-        self
-    }
-
-    /// Override max tokens for LLM responses.
-    pub fn with_max_tokens(mut self, max_tokens: usize) -> Self {
-        self.max_tokens = max_tokens;
+    /// Override the search endpoint (for testing or proxies).
+    pub fn with_parallel_url(mut self, url: impl Into<String>) -> Self {
+        self.parallel_url = url.into();
         self
     }
 
@@ -249,14 +169,6 @@ impl SweepProvider {
         self.resolve_key("parallel.ai", &self.parallel_key_var).await
     }
 
-    /// Resolve the Anthropic API key.
-    ///
-    /// Tries [`AuthProvider`] first (audience: `api.anthropic.com`), then
-    /// falls back to the configured environment variable.
-    async fn resolve_anthropic_key(&self) -> Result<String, SweepError> {
-        self.resolve_key("api.anthropic.com", &self.anthropic_key_var).await
-    }
-
     /// Resolve a key by trying the auth provider first, then env var.
     async fn resolve_key(&self, audience: &str, env_var: &str) -> Result<String, SweepError> {
         if let Some(auth) = &self.auth {
@@ -283,75 +195,6 @@ impl SweepProvider {
             ProcessorTier::Core => "core",
             ProcessorTier::Ultra => "ultra",
         }
-    }
-
-    /// Call Anthropic Messages API and return the text response.
-    async fn anthropic_call(
-        &self,
-        system: &str,
-        user_content: &str,
-    ) -> Result<(String, usize), SweepError> {
-        let key = self.resolve_anthropic_key().await?;
-        let request = AnthropicRequest {
-            model: self.model.clone(),
-            max_tokens: self.max_tokens,
-            system: Some(system.to_string()),
-            messages: vec![AnthropicMessage {
-                role: "user".into(),
-                content: user_content.to_string(),
-            }],
-        };
-
-        let resp = self
-            .client
-            .post(&self.anthropic_url)
-            .header("x-api-key", &key)
-            .header("anthropic-version", &self.anthropic_version)
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| SweepError::Transient(e.to_string()))?;
-
-        let status = resp.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(SweepError::Transient("rate limited".into()));
-        }
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(SweepError::Permanent(format!(
-                "auth failed ({})",
-                self.anthropic_key_var
-            )));
-        }
-        if status.is_server_error() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(SweepError::Transient(format!("{status}: {body}")));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(SweepError::Permanent(format!("{status}: {body}")));
-        }
-
-        let api_resp: AnthropicResponse = resp
-            .json()
-            .await
-            .map_err(|e| SweepError::LlmFailure(e.to_string()))?;
-
-        let total_tokens = api_resp.usage.input_tokens + api_resp.usage.output_tokens;
-
-        let text = api_resp
-            .content
-            .into_iter()
-            .filter(|b| b.block_type == "text")
-            .filter_map(|b| b.text)
-            .collect::<Vec<_>>()
-            .join("");
-
-        if text.is_empty() {
-            return Err(SweepError::LlmFailure("empty response".into()));
-        }
-
-        Ok((text, total_tokens))
     }
 }
 
@@ -419,57 +262,6 @@ impl ResearchProvider for SweepProvider {
             .map_err(|e| SweepError::LlmFailure(format!("parse search response: {e}")))?;
 
         Ok(search_resp.results)
-    }
-
-    async fn compare(
-        &self,
-        system: &str,
-        context: &str,
-        research: &str,
-        current_decision: &str,
-    ) -> Result<SweepVerdict, SweepError> {
-        let user_content = format!(
-            "## Context\n{context}\n\n## Research Findings\n{research}\n\n## Current Decision\n{current_decision}\n\nProduce a JSON verdict."
-        );
-
-        let (text, _tokens) = self.anthropic_call(system, &user_content).await?;
-
-        // Extract JSON from the response (may be wrapped in markdown fences)
-        let json_str = extract_json_block(&text);
-        serde_json::from_str::<SweepVerdict>(json_str)
-            .map_err(|e| SweepError::LlmFailure(format!("parse verdict: {e}")))
-    }
-
-    async fn plan(
-        &self,
-        decision_id: &str,
-        decision_text: &str,
-        previous_verdict: Option<&VerdictStatus>,
-    ) -> Result<Option<Vec<String>>, SweepError> {
-        let verdict_str = match previous_verdict {
-            Some(v) => serde_json::to_string(v).unwrap_or_default(),
-            None => "none".into(),
-        };
-
-        let system = "Generate 3-5 targeted research queries for evaluating an architectural \
-            decision against current industry practice. Return ONLY a JSON object: \
-            {\"queries\": [\"query1\", \"query2\", ...]}";
-
-        let user_content = format!(
-            "Decision ID: {decision_id}\nPrevious verdict: {verdict_str}\n\n{decision_text}"
-        );
-
-        // Plan failures are non-fatal — return None to fall back to keyword queries
-        match self.anthropic_call(system, &user_content).await {
-            Ok((text, _tokens)) => {
-                let json_str = extract_json_block(&text);
-                match serde_json::from_str::<PlanResponse>(json_str) {
-                    Ok(plan) if !plan.queries.is_empty() => Ok(Some(plan.queries)),
-                    _ => Ok(None),
-                }
-            }
-            Err(_) => Ok(None),
-        }
     }
 
     async fn research(
@@ -601,32 +393,6 @@ impl ResearchProvider for SweepProvider {
     }
 }
 
-/// Extract the first JSON block from LLM output, stripping markdown fences.
-fn extract_json_block(text: &str) -> &str {
-    let trimmed = text.trim();
-    // Try to extract from ```json ... ``` fences
-    if let Some(start) = trimmed.find("```json") {
-        let after_fence = &trimmed[start + 7..];
-        if let Some(end) = after_fence.find("```") {
-            return after_fence[..end].trim();
-        }
-    }
-    // Try ``` ... ``` fences
-    if let Some(start) = trimmed.find("```") {
-        let after_fence = &trimmed[start + 3..];
-        if let Some(end) = after_fence.find("```") {
-            return after_fence[..end].trim();
-        }
-    }
-    // Try to find raw JSON object
-    if let Some(start) = trimmed.find('{')
-        && let Some(end) = trimmed.rfind('}')
-    {
-        return &trimmed[start..=end];
-    }
-    trimmed
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -674,18 +440,18 @@ mod tests {
 
     #[test]
     fn constructor_default_urls() {
-        let p = SweepProvider::new("PAR_KEY", "ANT_KEY", "claude-sonnet-4-20250514");
+        let p = SweepProvider::new("PAR_KEY");
         assert_eq!(p.parallel_url, "https://api.parallel.ai/v1/search");
-        assert_eq!(p.anthropic_url, "https://api.anthropic.com/v1/messages");
-        assert_eq!(p.model, "claude-sonnet-4-20250514");
+        assert_eq!(p.parallel_task_url, "https://api.parallel.ai/v1/tasks/runs");
+        assert_eq!(p.parallel_extract_url, "https://api.parallel.ai/v1beta/extract");
+        assert_eq!(p.max_poll_attempts, 30);
+        assert_eq!(p.poll_interval_secs, 5);
     }
 
     #[test]
-    fn constructor_custom_urls() {
-        let p = SweepProvider::new("P", "A", "m")
-            .with_urls("http://local:8080/search", "http://local:9090/messages");
+    fn constructor_custom_parallel_url() {
+        let p = SweepProvider::new("P").with_parallel_url("http://local:8080/search");
         assert_eq!(p.parallel_url, "http://local:8080/search");
-        assert_eq!(p.anthropic_url, "http://local:9090/messages");
     }
 
     #[test]
@@ -694,37 +460,6 @@ mod tests {
         let resp: SearchResponse = serde_json::from_str(json).expect("parse");
         assert_eq!(resp.results.len(), 1);
         assert_eq!(resp.results[0].url, "https://ex.com");
-    }
-
-    #[test]
-    fn plan_response_deserialization() {
-        let json = r#"{"queries": ["q1", "q2", "q3"]}"#;
-        let resp: PlanResponse = serde_json::from_str(json).expect("parse");
-        assert_eq!(resp.queries.len(), 3);
-    }
-
-    #[test]
-    fn extract_json_block_fenced() {
-        let text = "Here is the verdict:\n```json\n{\"status\": \"confirmed\"}\n```\nDone.";
-        assert_eq!(extract_json_block(text), "{\"status\": \"confirmed\"}");
-    }
-
-    #[test]
-    fn extract_json_block_bare() {
-        let text = "{\"queries\": [\"a\", \"b\"]}";
-        assert_eq!(extract_json_block(text), "{\"queries\": [\"a\", \"b\"]}");
-    }
-
-    #[test]
-    fn extract_json_block_with_preamble() {
-        let text = "Sure! Here is the result:\n{\"status\": \"refined\"}";
-        assert_eq!(extract_json_block(text), "{\"status\": \"refined\"}");
-    }
-
-    #[test]
-    fn extract_json_block_generic_fence() {
-        let text = "```\n{\"x\": 1}\n```";
-        assert_eq!(extract_json_block(text), "{\"x\": 1}");
     }
 
     #[test]
@@ -773,15 +508,6 @@ mod tests {
         assert_eq!(resp.url, "https://ex.com/page");
     }
 
-    #[test]
-    fn constructor_default_task_urls() {
-        let p = SweepProvider::new("PAR_KEY", "ANT_KEY", "claude-sonnet-4-20250514");
-        assert_eq!(p.parallel_task_url, "https://api.parallel.ai/v1/tasks/runs");
-        assert_eq!(p.parallel_extract_url, "https://api.parallel.ai/v1beta/extract");
-        assert_eq!(p.max_poll_attempts, 30);
-        assert_eq!(p.poll_interval_secs, 5);
-    }
-
     // -- AuthProvider integration tests --
 
     struct StaticAuthProvider {
@@ -806,20 +532,20 @@ mod tests {
 
     #[test]
     fn with_auth_sets_provider() {
-        let p = SweepProvider::new("P", "A", "m")
+        let p = SweepProvider::new("P")
             .with_auth(Arc::new(StaticAuthProvider { token: b"tok".to_vec() }));
         assert!(p.auth.is_some());
     }
 
     #[test]
     fn default_auth_is_none() {
-        let p = SweepProvider::new("P", "A", "m");
+        let p = SweepProvider::new("P");
         assert!(p.auth.is_none());
     }
 
     #[tokio::test]
     async fn resolve_key_uses_auth_provider_when_set() {
-        let p = SweepProvider::new("NEURON_TEST_NONEXISTENT_zq9", "A", "m")
+        let p = SweepProvider::new("NEURON_TEST_NONEXISTENT_zq9")
             .with_auth(Arc::new(StaticAuthProvider {
                 token: b"auth-provided-key".to_vec(),
             }));
@@ -831,7 +557,7 @@ mod tests {
     async fn resolve_key_falls_back_to_env_on_auth_failure() {
         let var = "NEURON_TEST_AUTH_FALLBACK_k3j";
         unsafe { std::env::set_var(var, "env-key-value") };
-        let p = SweepProvider::new(var, "A", "m")
+        let p = SweepProvider::new(var)
             .with_auth(Arc::new(FailingAuthProvider));
         let key = p.resolve_parallel_key().await.unwrap();
         assert_eq!(key, "env-key-value");
@@ -842,7 +568,7 @@ mod tests {
     async fn resolve_key_env_var_when_no_auth() {
         let var = "NEURON_TEST_NO_AUTH_r8p";
         unsafe { std::env::set_var(var, "plain-env-key") };
-        let p = SweepProvider::new(var, "A", "m");
+        let p = SweepProvider::new(var);
         let key = p.resolve_parallel_key().await.unwrap();
         assert_eq!(key, "plain-env-key");
         unsafe { std::env::remove_var(var) };
@@ -852,7 +578,7 @@ mod tests {
     async fn resolve_key_auth_empty_token_falls_back() {
         let var = "NEURON_TEST_EMPTY_AUTH_w2x";
         unsafe { std::env::set_var(var, "fallback-key") };
-        let p = SweepProvider::new(var, "A", "m")
+        let p = SweepProvider::new(var)
             .with_auth(Arc::new(StaticAuthProvider { token: vec![] }));
         let key = p.resolve_parallel_key().await.unwrap();
         assert_eq!(key, "fallback-key");
@@ -861,7 +587,7 @@ mod tests {
 
     #[test]
     fn debug_impl_redacts_auth() {
-        let p = SweepProvider::new("P", "A", "m")
+        let p = SweepProvider::new("P")
             .with_auth(Arc::new(StaticAuthProvider { token: b"secret".to_vec() }));
         let debug = format!("{:?}", p);
         assert!(debug.contains("[configured]"));
@@ -870,7 +596,7 @@ mod tests {
 
     #[test]
     fn debug_impl_no_auth() {
-        let p = SweepProvider::new("P", "A", "m");
+        let p = SweepProvider::new("P");
         let debug = format!("{:?}", p);
         assert!(debug.contains("None"));
     }

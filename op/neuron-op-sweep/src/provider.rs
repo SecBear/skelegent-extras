@@ -4,7 +4,9 @@
 //! research backend). Production implementations make HTTP calls; test code
 //! uses [`MockProvider`].
 
-use crate::types::{ProcessorTier, SweepVerdict, VerdictStatus};
+use crate::types::{ProcessorTier, VerdictStatus};
+#[cfg(test)]
+use crate::types::SweepVerdict;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -83,24 +85,6 @@ pub trait ResearchProvider: Send + Sync {
         processor: ProcessorTier,
     ) -> Result<Vec<ResearchResult>, SweepError>;
 
-    /// Compare research findings against the current decision text.
-    ///
-    /// The LLM receives the system prompt, packed context, serialized research
-    /// results, and the full decision text, and produces a structured verdict.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SweepError::LlmFailure`] if the model fails or produces
-    /// unparseable output. Returns [`SweepError::DecisionNotFound`] if the
-    /// decision file cannot be read by the backend.
-    async fn compare(
-        &self,
-        system: &str,
-        context: &str,
-        research: &str,
-        current_decision: &str,
-    ) -> Result<SweepVerdict, SweepError>;
-
     /// Generate targeted research queries from the decision context.
     ///
     /// Returns a list of 1-5 queries optimized for the research backend.
@@ -158,7 +142,7 @@ pub struct MockProvider {
     call_count: std::sync::Mutex<usize>,
     /// Results returned after the failure window has passed.
     results: Vec<ResearchResult>,
-    /// Verdict returned by `compare`.
+    /// Retained for constructor compatibility; unused after compare() removal.
     compare_response: SweepVerdict,
 }
 
@@ -209,15 +193,6 @@ impl ResearchProvider for MockProvider {
         }
     }
 
-    async fn compare(
-        &self,
-        _system: &str,
-        _context: &str,
-        _research: &str,
-        _current_decision: &str,
-    ) -> Result<SweepVerdict, SweepError> {
-        Ok(self.compare_response.clone())
-    }
 }
 
 #[cfg(test)]
@@ -263,17 +238,6 @@ mod tests {
         assert_eq!(results[0].url, expected[0].url);
     }
 
-    #[tokio::test]
-    async fn mock_provider_returns_configured_verdict() {
-        let verdict = dummy_verdict("topic-3b");
-        let provider = MockProvider::new(vec![], verdict.clone());
-        let result = provider
-            .compare("sys", "ctx", "research", "decision")
-            .await
-            .expect("compare should succeed");
-        assert_eq!(result.decision_id, "topic-3b");
-        assert_eq!(result.status, VerdictStatus::Confirmed);
-    }
 
     #[tokio::test]
     async fn mock_provider_fails_first_n_then_succeeds() {

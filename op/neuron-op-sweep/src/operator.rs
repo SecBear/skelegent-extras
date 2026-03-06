@@ -19,6 +19,8 @@ use layer0::{
 use crate::cost::SweepCostTracker;
 use crate::provider::{ResearchProvider, ResearchResult, SweepError};
 use crate::types::{ProcessorTier, SweepMeta, SweepVerdict, VerdictStatus};
+use neuron_turn::provider::{Provider, ProviderError};
+use neuron_turn::types::{ContentPart, ProviderMessage, ProviderRequest, Role};
 
 // ---------------------------------------------------------------------------
 // StoreAsReader adapter
@@ -128,6 +130,51 @@ impl Default for SweepOperatorConfig {
     }
 }
 
+/// Build a keyword-based research query from the decision card text.
+pub(crate) fn keyword_query(card_text: &str) -> String {
+    format!(
+        "{} agent architecture production systems frameworks best practices 2025 2026",
+        card_text
+            .split_whitespace()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+/// Select the research processor tier based on budget and previous verdict.
+pub(crate) fn select_processor(
+    budget_remaining_usd: f64,
+    budget_total_usd: f64,
+    previous_verdict: Option<&VerdictStatus>,
+) -> ProcessorTier {
+    if budget_total_usd <= 0.0 {
+        return ProcessorTier::Base;
+    }
+    let budget_ratio = budget_remaining_usd / budget_total_usd;
+    match previous_verdict {
+        Some(VerdictStatus::Challenged) => {
+            if budget_ratio > 0.5 {
+                ProcessorTier::Ultra
+            } else {
+                ProcessorTier::Core
+            }
+        }
+        Some(VerdictStatus::Refined) => ProcessorTier::Core,
+        _ => {
+            if budget_ratio > 0.8 {
+                ProcessorTier::Core
+            } else {
+                ProcessorTier::Base
+            }
+        }
+    }
+}
+
+const MAX_RESEARCH_RETRIES: usize = 3;
+const BACKOFF_BASE_SECS: u64 = 1;
+const BACKOFF_MULTIPLIER: u64 = 4;
+
 // ---------------------------------------------------------------------------
 // Internal retry helper (shared by SweepOperator and ResearchOperator)
 // ---------------------------------------------------------------------------
@@ -147,9 +194,9 @@ pub(crate) async fn research_with_retry_inner(
     loop {
         match provider.search(query, processor.clone()).await {
             Ok(results) => return Ok(results),
-            Err(e) if e.is_transient() && attempt < SweepOperator::MAX_RESEARCH_RETRIES => {
-                let delay_secs = SweepOperator::BACKOFF_BASE_SECS
-                    * SweepOperator::BACKOFF_MULTIPLIER.pow(attempt as u32);
+            Err(e) if e.is_transient() && attempt < MAX_RESEARCH_RETRIES => {
+                let delay_secs = BACKOFF_BASE_SECS
+                    * BACKOFF_MULTIPLIER.pow(attempt as u32);
                 tokio::time::sleep(Duration::from_secs(delay_secs)).await;
                 attempt += 1;
             }
@@ -178,43 +225,38 @@ pub(crate) async fn research_with_retry_inner(
 /// 6. **Compare** — LLM compares research against the current decision.
 /// 7. **State update** — persist delta and updated card.
 /// 8. **Emit** — return the structured verdict.
-pub struct SweepOperator {
+pub struct SweepOperator<P: Provider> {
     /// Operator configuration.
     pub config: SweepOperatorConfig,
     /// Research backend (Parallel.ai or mock for tests).
     provider: Box<dyn ResearchProvider>,
+    /// LLM backend for verdict comparison.
+    llm: P,
 }
 
-impl SweepOperator {
+impl<P: Provider> SweepOperator<P> {
     /// Retry limit for transient research API failures.
     ///
     /// Combined with [`BACKOFF_BASE_SECS`] and [`BACKOFF_MULTIPLIER`], this
     /// gives delays of 1 s, 4 s, and 16 s before the final failure.
-    pub const MAX_RESEARCH_RETRIES: usize = 3;
+    pub const MAX_RESEARCH_RETRIES: usize = MAX_RESEARCH_RETRIES;
 
     /// Base delay in seconds for the first retry.
-    pub const BACKOFF_BASE_SECS: u64 = 1;
+    pub const BACKOFF_BASE_SECS: u64 = BACKOFF_BASE_SECS;
 
     /// Multiplier applied to the base delay for each subsequent retry.
     ///
     /// Delay for attempt `n` is `BACKOFF_BASE_SECS * BACKOFF_MULTIPLIER^n`.
-    pub const BACKOFF_MULTIPLIER: u64 = 4;
+    pub const BACKOFF_MULTIPLIER: u64 = BACKOFF_MULTIPLIER;
 
     /// Create a new sweep operator.
-    pub fn new(config: SweepOperatorConfig, provider: Box<dyn ResearchProvider>) -> Self {
-        Self { config, provider }
+    pub fn new(config: SweepOperatorConfig, provider: Box<dyn ResearchProvider>, llm: P) -> Self {
+        Self { config, provider, llm }
     }
 
     /// Build a keyword-based research query from the decision card text.
     pub fn keyword_query(card_text: &str) -> String {
-        format!(
-            "{} agent architecture production systems frameworks best practices 2025 2026",
-            card_text
-                .split_whitespace()
-                .take(8)
-                .collect::<Vec<_>>()
-                .join(" ")
-        )
+        keyword_query(card_text)
     }
 
     /// Select the research processor tier based on budget and previous verdict.
@@ -236,28 +278,7 @@ impl SweepOperator {
         budget_total_usd: f64,
         previous_verdict: Option<&VerdictStatus>,
     ) -> ProcessorTier {
-        if budget_total_usd <= 0.0 {
-            return ProcessorTier::Base;
-        }
-        let budget_ratio = budget_remaining_usd / budget_total_usd;
-
-        match previous_verdict {
-            Some(VerdictStatus::Challenged) => {
-                if budget_ratio > 0.5 {
-                    ProcessorTier::Ultra
-                } else {
-                    ProcessorTier::Core
-                }
-            }
-            Some(VerdictStatus::Refined) => ProcessorTier::Core,
-            _ => {
-                if budget_ratio > 0.8 {
-                    ProcessorTier::Core
-                } else {
-                    ProcessorTier::Base
-                }
-            }
-        }
+        select_processor(budget_remaining_usd, budget_total_usd, previous_verdict)
     }
 
     /// Execute a research query with exponential-backoff retry on transient errors.
@@ -391,10 +412,10 @@ impl SweepOperator {
                     Ok(Some(planned)) if !planned.is_empty() => {
                         planned.into_iter().take(self.config.max_queries).collect()
                     }
-                    _ => vec![Self::keyword_query(&card_text)],
+                    _ => vec![keyword_query(&card_text)],
                 }
             }
-            _ => vec![Self::keyword_query(&card_text)],
+            _ => vec![keyword_query(&card_text)],
         };
 
         // ------------------------------------------------------------------
@@ -414,7 +435,7 @@ impl SweepOperator {
         // Step 4: RESEARCH
         // Execute queries via the provider with retry and budget-aware tier.
         // ------------------------------------------------------------------
-        let processor = Self::select_processor(
+        let processor = select_processor(
             budget_remaining_usd,
             budget_total_usd,
             previous_verdict.as_ref(),
@@ -491,40 +512,51 @@ impl SweepOperator {
 
         // ------------------------------------------------------------------
         // Step 6: COMPARE + VERDICT
-        // The provider calls an LLM that compares research against the
-        // current decision and returns a structured SweepVerdict.
+        // The LLM compares research findings against the current decision
+        // and returns a structured SweepVerdict.
         // ------------------------------------------------------------------
         let research_json =
             serde_json::to_string(&all_results).unwrap_or_else(|_| "[]".to_string());
 
-        let verdict = match self
-            .provider
-            .compare(
-                COMPARISON_SYSTEM_PROMPT,
-                "", // packed context (v1: empty; v2 passes _context_messages)
-                &research_json,
-                decision_id,
-            )
-            .await
-        {
-            Ok(v) => v,
-            Err(SweepError::DecisionNotFound(id)) => {
-                return Ok(SweepVerdict {
-                    decision_id: decision_id.to_string(),
-                    status: VerdictStatus::Skipped,
-                    confidence: 0.0,
-                    num_supporting: 0,
-                    num_contradicting: 0,
-                    cost_usd: cost_tracker.total(),
-                    processor,
-                    duration_secs: start.elapsed().as_secs_f64(),
-                    swept_at: chrono::Utc::now().to_rfc3339(),
-                    evidence: vec![],
-                    narrative: format!("Decision {id} not found"),
-                    proposed_diff: None,
-                });
+        let user_content = format!(
+            "Decision ID: {}\n\n<research>\n{}\n</research>",
+            decision_id, research_json
+        );
+        let request = ProviderRequest {
+            model: Some(self.config.model.clone()),
+            messages: vec![ProviderMessage {
+                role: Role::User,
+                content: vec![ContentPart::Text { text: user_content }],
+            }],
+            tools: vec![],
+            max_tokens: Some(self.config.max_response_tokens as u32),
+            temperature: None,
+            system: Some(COMPARISON_SYSTEM_PROMPT.to_string()),
+            extra: serde_json::Value::Null,
+        };
+        let response = self.llm.complete(request).await.map_err(|e| match e {
+            ProviderError::RateLimited => SweepError::Transient("rate limited by LLM".into()),
+            ProviderError::TransientError { message, .. } => SweepError::Transient(message),
+            ProviderError::AuthFailed(msg) => {
+                SweepError::Permanent(format!("LLM auth: {msg}"))
             }
-            Err(e) => return Err(e),
+            other => SweepError::LlmFailure(other.to_string()),
+        })?;
+        let raw = response
+            .content
+            .iter()
+            .find_map(|p| {
+                if let ContentPart::Text { text } = p {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or("");
+        let verdict: SweepVerdict = {
+            let json_str = extract_json_block(raw);
+            serde_json::from_str(json_str)
+                .map_err(|e| SweepError::LlmFailure(format!("parse verdict: {e}")))?
         };
 
         cost_tracker.comparison_cost_usd += verdict.cost_usd;
@@ -709,10 +741,30 @@ impl Operator for ResearchOperator {
 }
 
 // ---------------------------------------------------------------------------
+// Verdict JSON extraction helper
+// ---------------------------------------------------------------------------
+
+/// Strip an optional `` ```json `` / `` ``` `` fence and return the inner JSON slice.
+///
+/// Many LLMs wrap JSON responses in a fenced code block. If no fence is found,
+/// the input is returned unchanged.
+fn extract_json_block(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if let Some(inner) = trimmed.strip_prefix("```json") {
+        inner.trim_start().trim_end_matches("```").trim()
+    } else if let Some(inner) = trimmed.strip_prefix("```") {
+        inner.trim_end_matches("```").trim()
+    } else {
+        trimmed
+    }
+}
+
+
+// ---------------------------------------------------------------------------
 // CompareOperator
 // ---------------------------------------------------------------------------
 
-/// Operator that compares research findings against a decision via the [`ResearchProvider`].
+/// Operator that compares research findings against a decision via an LLM [`Provider`].
 ///
 /// Dispatched by [`crate::workflow::run_sweep`] for step 6 of the sweep pipeline
 /// (comparison). Declares [`Effect::WriteMemory`] for sweep metadata and a delta
@@ -725,26 +777,28 @@ impl Operator for ResearchOperator {
 ///
 /// # Output
 ///
-/// - `output.message` — JSON-serialized [`SweepVerdict`], or
-///   `"DECISION_NOT_FOUND:{id}"` if the provider returned [`SweepError::DecisionNotFound`].
+/// - `output.message` — JSON-serialized [`SweepVerdict`].
 /// - `output.effects` — [`Effect::WriteMemory`] for the sweep metadata key
 ///   (`meta:{id}:last_sweep`) and a delta key (`delta:{id}:{timestamp}`).
-pub struct CompareOperator {
-    /// Research provider backend (Parallel.ai or mock).
-    provider: Box<dyn ResearchProvider>,
+pub struct CompareOperator<P: Provider> {
+    /// LLM provider used for verdict comparison.
+    llm: P,
     /// Operator configuration.
     pub config: SweepOperatorConfig,
 }
 
-impl CompareOperator {
+impl<P: Provider> CompareOperator<P> {
     /// Create a new compare operator.
-    pub fn new(provider: Box<dyn ResearchProvider>, config: SweepOperatorConfig) -> Self {
-        Self { provider, config }
+    ///
+    /// Use [`neuron_provider_anthropic::AnthropicProvider::with_auth`] to wire
+    /// pi coding agent OAuth credentials directly.
+    pub fn new(llm: P, config: SweepOperatorConfig) -> Self {
+        Self { llm, config }
     }
 }
 
 #[async_trait::async_trait]
-impl Operator for CompareOperator {
+impl<P: Provider + 'static> Operator for CompareOperator<P> {
     async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
         // Extract the research JSON from the input message.
         let research_json = input
@@ -765,32 +819,58 @@ impl Operator for CompareOperator {
             .unwrap_or("unknown")
             .to_string();
 
-        // Execute the LLM comparison via the provider.
-        let verdict = match self
-            .provider
-            .compare(
-                COMPARISON_SYSTEM_PROMPT,
-                "", // packed context (v1: empty)
-                &research_json,
-                &decision_id,
-            )
-            .await
-        {
-            Ok(v) => v,
-            Err(SweepError::DecisionNotFound(id)) => {
-                return Ok(OperatorOutput::new(
-                    Content::text(format!("DECISION_NOT_FOUND:{id}")),
-                    ExitReason::Complete,
-                ));
+        // Build an LLM request using the configured model.
+        let user_content = format!(
+            "Decision ID: {}\n\n<research>\n{}\n</research>",
+            decision_id, research_json
+        );
+        let request = ProviderRequest {
+            model: Some(self.config.model.clone()),
+            messages: vec![ProviderMessage {
+                role: Role::User,
+                content: vec![ContentPart::Text { text: user_content }],
+            }],
+            tools: vec![],
+            max_tokens: Some(self.config.max_response_tokens as u32),
+            temperature: None,
+            system: Some(COMPARISON_SYSTEM_PROMPT.to_string()),
+            extra: serde_json::Value::Null,
+        };
+
+        let response = self.llm.complete(request).await.map_err(|e| match e {
+            ProviderError::RateLimited => {
+                OperatorError::Retryable("rate limited by LLM provider".into())
             }
-            Err(SweepError::LlmFailure(msg)) => return Err(OperatorError::Model(msg)),
-            Err(SweepError::Transient(msg)) => return Err(OperatorError::Retryable(msg)),
-            Err(SweepError::Permanent(msg)) => {
-                return Err(OperatorError::NonRetryable(msg));
+            ProviderError::TransientError { message, .. } => {
+                OperatorError::Retryable(message)
             }
-            Err(SweepError::BudgetExhausted) => {
-                return Err(OperatorError::NonRetryable("budget exhausted".into()));
+            ProviderError::AuthFailed(msg) => {
+                OperatorError::NonRetryable(format!("auth: {msg}"))
             }
+            other => OperatorError::Model(other.to_string()),
+        })?;
+
+        // Extract text content from the LLM response.
+        let raw = response
+            .content
+            .iter()
+            .find_map(|p| {
+                if let ContentPart::Text { text } = p {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or("");
+
+        // Parse the JSON verdict (may be fenced ```json ... ```).
+        let verdict: SweepVerdict = {
+            let json_str = extract_json_block(raw);
+            serde_json::from_str(json_str).map_err(|e| {
+                OperatorError::Model(format!(
+                    "CompareOperator: failed to parse LLM verdict JSON: {e}\nRaw: {raw}"
+                ))
+            })?
         };
 
         // Declare WriteMemory effects for sweep metadata and delta.
@@ -858,6 +938,7 @@ mod tests {
     use super::*;
     use crate::provider::MockProvider;
     use crate::types::{EvidenceItem, EvidenceStance, ProcessorTier};
+    use neuron_turn::types::{ProviderResponse, StopReason, TokenUsage};
     use std::sync::Arc;
     use layer0::operator::TriggerType;
 
@@ -896,8 +977,33 @@ mod tests {
         }
     }
 
-    fn default_operator(mock: MockProvider) -> SweepOperator {
-        SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock))
+
+    /// Shared mock LLM provider that returns a fixed verdict as JSON.
+    struct MockLlmProvider {
+        verdict: SweepVerdict,
+    }
+
+    impl Provider for MockLlmProvider {
+        fn complete(
+            &self,
+            _request: ProviderRequest,
+        ) -> impl std::future::Future<Output = Result<ProviderResponse, ProviderError>>
+               + Send {
+            let json = serde_json::to_string(&self.verdict).expect("verdict serializable");
+            async move {
+                Ok(ProviderResponse {
+                    content: vec![ContentPart::Text { text: json }],
+                    stop_reason: StopReason::EndTurn,
+                    usage: TokenUsage::default(),
+                    model: "mock".into(),
+                    cost: None,
+                    truncated: None,
+                })
+            }
+        }
+    }
+    fn default_operator(mock: MockProvider) -> SweepOperator<MockLlmProvider> {
+        SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock), MockLlmProvider { verdict: dummy_verdict("test") })
     }
 
     // -----------------------------------------------------------------------
@@ -906,13 +1012,13 @@ mod tests {
 
     #[test]
     fn select_processor_challenged_high_budget_returns_ultra() {
-        let tier = SweepOperator::select_processor(6.0, 10.0, Some(&VerdictStatus::Challenged));
+        let tier = select_processor(6.0, 10.0, Some(&VerdictStatus::Challenged));
         assert_eq!(tier, ProcessorTier::Ultra, "budget_ratio=0.6 > 0.5 → Ultra");
     }
 
     #[test]
     fn select_processor_challenged_low_budget_returns_core() {
-        let tier = SweepOperator::select_processor(4.0, 10.0, Some(&VerdictStatus::Challenged));
+        let tier = select_processor(4.0, 10.0, Some(&VerdictStatus::Challenged));
         assert_eq!(tier, ProcessorTier::Core, "budget_ratio=0.4 ≤ 0.5 → Core");
     }
 
@@ -920,7 +1026,7 @@ mod tests {
     fn select_processor_refined_returns_core_regardless_of_budget() {
         for remaining in [0.1, 5.0, 9.9] {
             let tier =
-                SweepOperator::select_processor(remaining, 10.0, Some(&VerdictStatus::Refined));
+                select_processor(remaining, 10.0, Some(&VerdictStatus::Refined));
             assert_eq!(
                 tier,
                 ProcessorTier::Core,
@@ -938,7 +1044,7 @@ mod tests {
             Some(&VerdictStatus::Obsoleted),
             Some(&VerdictStatus::Skipped),
         ] {
-            let tier = SweepOperator::select_processor(9.0, 10.0, verdict);
+            let tier = select_processor(9.0, 10.0, verdict);
             assert_eq!(
                 tier,
                 ProcessorTier::Core,
@@ -951,7 +1057,7 @@ mod tests {
     #[test]
     fn select_processor_default_low_budget_returns_base() {
         for verdict in [None, Some(&VerdictStatus::Confirmed)] {
-            let tier = SweepOperator::select_processor(7.0, 10.0, verdict);
+            let tier = select_processor(7.0, 10.0, verdict);
             assert_eq!(
                 tier,
                 ProcessorTier::Base,
@@ -963,21 +1069,21 @@ mod tests {
 
     #[test]
     fn select_processor_zero_total_budget_returns_base() {
-        let tier = SweepOperator::select_processor(5.0, 0.0, Some(&VerdictStatus::Challenged));
+        let tier = select_processor(5.0, 0.0, Some(&VerdictStatus::Challenged));
         assert_eq!(tier, ProcessorTier::Base, "zero total budget → Base");
     }
 
     #[test]
     fn select_processor_challenged_exactly_50pct_returns_core() {
         // budget_ratio == 0.5 is NOT > 0.5, so falls to Core
-        let tier = SweepOperator::select_processor(5.0, 10.0, Some(&VerdictStatus::Challenged));
+        let tier = select_processor(5.0, 10.0, Some(&VerdictStatus::Challenged));
         assert_eq!(tier, ProcessorTier::Core);
     }
 
     #[test]
     fn select_processor_default_exactly_80pct_returns_base() {
         // budget_ratio == 0.8 is NOT > 0.8, so falls to Base
-        let tier = SweepOperator::select_processor(8.0, 10.0, None);
+        let tier = select_processor(8.0, 10.0, None);
         assert_eq!(tier, ProcessorTier::Base);
     }
 
@@ -1002,10 +1108,7 @@ mod tests {
 
         let results = vec![dummy_result()];
         let mock = MockProvider::new_failing(2, results.clone(), dummy_verdict("test"));
-        let op = Arc::new(SweepOperator::new(
-            SweepOperatorConfig::default(),
-            Box::new(mock),
-        ));
+        let op = Arc::new(SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock), MockLlmProvider { verdict: dummy_verdict("test") }));
 
         let op_clone = Arc::clone(&op);
         let handle = tokio::spawn(async move {
@@ -1045,22 +1148,9 @@ mod tests {
             ) -> Result<Vec<ResearchResult>, SweepError> {
                 Err(SweepError::Permanent("400 bad request".to_string()))
             }
-
-            async fn compare(
-                &self,
-                _system: &str,
-                _context: &str,
-                _research: &str,
-                _current_decision: &str,
-            ) -> Result<SweepVerdict, SweepError> {
-                unreachable!()
-            }
         }
 
-        let op = SweepOperator::new(
-            SweepOperatorConfig::default(),
-            Box::new(PermanentErrorProvider),
-        );
+        let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(PermanentErrorProvider), MockLlmProvider { verdict: dummy_verdict("test") });
         let err = op
             .research_with_retry("q", ProcessorTier::Base)
             .await
@@ -1112,7 +1202,7 @@ mod tests {
         }
 
         let mock = MockProvider::new(vec![dummy_result()], dummy_verdict("topic-3b"));
-        let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock));
+        let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock), MockLlmProvider { verdict: dummy_verdict("test") });
 
         let verdict = op
             .run("topic-3b", None, 0.0, 10.0, &EmptyStore)
@@ -1159,7 +1249,7 @@ mod tests {
 
         // Provider returns zero results
         let mock = MockProvider::new(vec![], dummy_verdict("topic-3b"));
-        let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock));
+        let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock), MockLlmProvider { verdict: dummy_verdict("test") });
 
         let verdict = op
             .run("topic-3b", None, 8.0, 10.0, &EmptyStore)
@@ -1207,7 +1297,7 @@ mod tests {
 
         let expected = dummy_verdict("topic-3b");
         let mock = MockProvider::new(vec![dummy_result()], expected.clone());
-        let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock));
+        let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock), MockLlmProvider { verdict: dummy_verdict("test") });
 
         let verdict = op
             .run("topic-3b", None, 8.0, 10.0, &EmptyStore)
@@ -1246,7 +1336,7 @@ mod tests {
         // MockProvider's plan() returns None (default impl), so operator falls
         // back to keyword query. Verify the pipeline still works end-to-end.
         let mock = MockProvider::new(vec![dummy_result()], dummy_verdict("topic-3b"));
-        let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock));
+        let op = SweepOperator::new(SweepOperatorConfig::default(), Box::new(mock), MockLlmProvider { verdict: dummy_verdict("test") });
 
         let verdict = op
             .run("topic-3b", Some(VerdictStatus::Challenged), 8.0, 10.0, &EmptyStore)
@@ -1342,16 +1432,6 @@ mod tests {
             ) -> Result<Vec<ResearchResult>, SweepError> {
                 Err(SweepError::DecisionNotFound("D9X".to_string()))
             }
-
-            async fn compare(
-                &self,
-                _system: &str,
-                _context: &str,
-                _research: &str,
-                _current_decision: &str,
-            ) -> Result<SweepVerdict, SweepError> {
-                unreachable!()
-            }
         }
 
         let op = ResearchOperator::new(Box::new(NotFoundProvider), SweepOperatorConfig::default());
@@ -1374,11 +1454,12 @@ mod tests {
     // CompareOperator — Operator trait impl
     // -----------------------------------------------------------------------
 
+
     #[tokio::test]
     async fn compare_operator_returns_verdict_json() {
         let expected = dummy_verdict("topic-3b");
-        let mock = MockProvider::new(vec![], expected.clone());
-        let op = CompareOperator::new(Box::new(mock), SweepOperatorConfig::default());
+        let mock = MockLlmProvider { verdict: expected.clone() };
+        let op = CompareOperator::new(mock, SweepOperatorConfig::default());
 
         let research = serde_json::to_string(&vec![dummy_result()]).unwrap();
         let mut input = OperatorInput::new(Content::text(research), TriggerType::Task);
@@ -1393,8 +1474,8 @@ mod tests {
 
     #[tokio::test]
     async fn compare_operator_declares_write_memory_effects() {
-        let mock = MockProvider::new(vec![], dummy_verdict("topic-3b"));
-        let op = CompareOperator::new(Box::new(mock), SweepOperatorConfig::default());
+        let mock = MockLlmProvider { verdict: dummy_verdict("topic-3b") };
+        let op = CompareOperator::new(mock, SweepOperatorConfig::default());
 
         let research = serde_json::to_string(&vec![dummy_result()]).unwrap();
         let mut input = OperatorInput::new(Content::text(research), TriggerType::Task);
@@ -1430,46 +1511,5 @@ mod tests {
                 "second effect should be a delta key, got: {key}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn compare_operator_returns_decision_not_found_sentinel() {
-        struct NotFoundProvider;
-
-        #[async_trait::async_trait]
-        impl ResearchProvider for NotFoundProvider {
-            async fn search(
-                &self,
-                _query: &str,
-                _processor: ProcessorTier,
-            ) -> Result<Vec<ResearchResult>, SweepError> {
-                unreachable!()
-            }
-
-            async fn compare(
-                &self,
-                _system: &str,
-                _context: &str,
-                _research: &str,
-                _current_decision: &str,
-            ) -> Result<SweepVerdict, SweepError> {
-                Err(SweepError::DecisionNotFound("D9X".to_string()))
-            }
-        }
-
-        let op = CompareOperator::new(Box::new(NotFoundProvider), SweepOperatorConfig::default());
-        let mut input = OperatorInput::new(Content::text("[]"), TriggerType::Task);
-        input.metadata = serde_json::json!({"decision_id": "D9X"});
-
-        let output = op.execute(input).await.expect("execute should not error");
-        let text = output.message.as_text().unwrap_or("");
-        assert!(
-            text.starts_with("DECISION_NOT_FOUND:"),
-            "expected sentinel, got: {text}"
-        );
-        assert!(
-            output.effects.is_empty(),
-            "no effects when decision not found"
-        );
     }
 }
