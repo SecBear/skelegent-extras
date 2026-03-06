@@ -10,6 +10,7 @@ members = [
   "auth/neuron-auth-oauth",
   "auth/neuron-auth-pi",
   "auth/neuron-auth-omp",
+  "client/neuron-client-parallel",
 ]
 
 [workspace.package]

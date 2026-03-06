@@ -1,22 +1,21 @@
-//! Sweep operator pipeline — orchestrates research, comparison, and verdict.
+//! Sweep operator pipeline — comparison and verdict.
 //!
-//! [`ResearchOperator`] and [`CompareOperator`] implement the pipeline defined in
-//! spec section 4.2: research → artifact storage → compare → verdict.
-//! Orchestrated by [`crate::workflow::run_sweep`].
+//! [`CompareOperator`] implements the comparison step of the sweep pipeline.
+//! Research is orchestrator-owned: callers supply research results to
+//! [`crate::workflow::run_sweep`] directly rather than dispatching a research operator.
 //!
-//! [`ResearchOperator`] and [`CompareOperator`] implement the [`Operator`] trait,
-//! allowing them to be dispatched via an [`Orchestrator`] without violating the
-//! effects boundary. Use [`crate::workflow::run_sweep`] to sequence them.
+//! [`CompareOperator`] implements the [`Operator`] trait, allowing it to be
+//! dispatched via an [`Orchestrator`] without violating the effects boundary.
+//! Use [`crate::workflow::run_sweep`] to sequence context assembly and comparison.
 
 use std::time::Duration;
 
-use layer0::state::{ContentKind, Lifetime, MemoryTier, StateReader, StateStore};
+use layer0::state::{MemoryTier, StateReader, StateStore};
 use layer0::{
-    Content, DurationMs, Effect, ExitReason, Operator, OperatorError, OperatorInput,
+    Content, Effect, ExitReason, Operator, OperatorError, OperatorInput,
     OperatorOutput, Scope,
 };
 
-use crate::provider::{ResearchProvider, ResearchResult, SweepError};
 use crate::types::{ProcessorTier, SweepMeta, SweepVerdict, VerdictStatus};
 use neuron_turn::provider::{Provider, ProviderError};
 use neuron_turn::types::{ContentPart, ProviderMessage, ProviderRequest, Role};
@@ -62,13 +61,18 @@ impl StateReader for StoreAsReader<'_> {
 // System prompt
 // ---------------------------------------------------------------------------
 
-/// Comparison system prompt sent to the LLM in Step 6.
+/// Comparison system prompt sent to the LLM.
 ///
-/// Instructs the model to produce a structured verdict by comparing research
-/// findings against the existing decision text.
+/// Instructs the model to compare research findings against the existing
+/// decision text (all three sections supplied in the user message).
 pub(crate) const COMPARISON_SYSTEM_PROMPT: &str = "\
-You are an architectural decision analyst. Compare research findings against \
-an existing decision and produce a structured verdict.
+You are an architectural decision analyst. You will receive:
+1. A <decision> section containing the current decision text
+2. A <prior_findings> section with previous sweep results (may be empty)
+3. A <research> section with new research findings
+
+Compare the research findings against the existing decision and produce a \
+structured JSON verdict.
 
 Rules:
 - \"confirmed\" requires >= 3 supporting sources and 0 contradicting
@@ -82,7 +86,7 @@ Rules:
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Static configuration shared by [`ResearchOperator`] and [`CompareOperator`].
+/// Configuration for [`CompareOperator`].
 #[derive(Debug, Clone)]
 pub struct SweepOperatorConfig {
     /// Minimum time between sweeps of the same decision.
@@ -129,17 +133,6 @@ impl Default for SweepOperatorConfig {
     }
 }
 
-/// Build a keyword-based research query from the decision card text.
-pub(crate) fn keyword_query(card_text: &str) -> String {
-    format!(
-        "{} agent architecture production systems frameworks best practices 2025 2026",
-        card_text
-            .split_whitespace()
-            .take(8)
-            .collect::<Vec<_>>()
-            .join(" ")
-    )
-}
 
 /// Select the research processor tier based on budget and previous verdict.
 pub(crate) fn select_processor(
@@ -170,162 +163,6 @@ pub(crate) fn select_processor(
     }
 }
 
-const MAX_RESEARCH_RETRIES: usize = 3;
-const BACKOFF_BASE_SECS: u64 = 1;
-const BACKOFF_MULTIPLIER: u64 = 4;
-
-// ---------------------------------------------------------------------------
-// Internal retry helper (used by ResearchOperator)
-// ---------------------------------------------------------------------------
-
-/// Execute a research query with exponential-backoff retry on transient errors.
-///
-/// Retries up to [`MAX_RESEARCH_RETRIES`] times for [`SweepError::Transient`]
-/// errors, with delays computed from [`BACKOFF_BASE_SECS`] and [`BACKOFF_MULTIPLIER`].
-/// Permanent errors are returned immediately.
-pub(crate) async fn research_with_retry_inner(
-    provider: &dyn ResearchProvider,
-    query: &str,
-    processor: ProcessorTier,
-) -> Result<Vec<ResearchResult>, SweepError> {
-    let mut attempt: usize = 0;
-    loop {
-        match provider.search(query, processor.clone()).await {
-            Ok(results) => return Ok(results),
-            Err(e) if e.is_transient() && attempt < MAX_RESEARCH_RETRIES => {
-                let delay_secs = BACKOFF_BASE_SECS
-                    * BACKOFF_MULTIPLIER.pow(attempt as u32);
-                tokio::time::sleep(Duration::from_secs(delay_secs)).await;
-                attempt += 1;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ResearchOperator
-// ---------------------------------------------------------------------------
-
-/// Operator that executes web research queries via the [`ResearchProvider`].
-///
-/// Dispatched by [`crate::workflow::run_sweep`] for step 4 of the sweep pipeline
-/// (research). Declares [`Effect::WriteMemory`] for each research artifact (step 5)
-/// rather than writing to state directly, preserving the effects boundary.
-///
-/// # Input
-///
-/// - `input.message` — the query string (text content).
-/// - `input.metadata["processor"]` — [`ProcessorTier`] serialized as a JSON string
-///   (`"base"`, `"core"`, or `"ultra"`). Defaults to `Base` if absent.
-/// - `input.metadata["decision_id"]` — string identifier for the decision.
-///
-/// # Output
-///
-/// - `output.message` — JSON-serialized `Vec<ResearchResult>`, or
-///   `"DECISION_NOT_FOUND:{id}"` if the provider returned [`SweepError::DecisionNotFound`].
-/// - `output.effects` — one [`Effect::WriteMemory`] per research result (artifact storage).
-pub struct ResearchOperator {
-    /// Research provider backend (Parallel.ai or mock).
-    provider: Box<dyn ResearchProvider>,
-    /// Operator configuration.
-    pub config: SweepOperatorConfig,
-}
-
-impl ResearchOperator {
-    /// Create a new research operator.
-    pub fn new(provider: Box<dyn ResearchProvider>, config: SweepOperatorConfig) -> Self {
-        Self { provider, config }
-    }
-}
-
-#[async_trait::async_trait]
-impl Operator for ResearchOperator {
-    async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
-        // Extract query from the input message.
-        let query = input
-            .message
-            .as_text()
-            .ok_or_else(|| {
-                OperatorError::NonRetryable(
-                    "ResearchOperator: input.message must be text containing the query".into(),
-                )
-            })?
-            .to_string();
-
-        // Extract processor tier from metadata (defaults to Base).
-        let processor: ProcessorTier = input
-            .metadata
-            .get("processor")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or(ProcessorTier::Base);
-
-        // Extract decision_id for artifact key generation.
-        let decision_id = input
-            .metadata
-            .get("decision_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        // Execute research with exponential-backoff retry.
-        let results =
-            match research_with_retry_inner(&*self.provider, &query, processor).await {
-                Ok(results) => results,
-                Err(SweepError::DecisionNotFound(id)) => {
-                    // Signal to the workflow that the decision was not found.
-                    return Ok(OperatorOutput::new(
-                        Content::text(format!("DECISION_NOT_FOUND:{id}")),
-                        ExitReason::Complete,
-                    ));
-                }
-                Err(SweepError::Transient(msg)) => return Err(OperatorError::Retryable(msg)),
-                Err(SweepError::Permanent(msg)) => {
-                    return Err(OperatorError::NonRetryable(msg));
-                }
-                Err(SweepError::LlmFailure(msg)) => return Err(OperatorError::Model(msg)),
-                Err(SweepError::BudgetExhausted) => {
-                    return Err(OperatorError::NonRetryable("budget exhausted".into()));
-                }
-            };
-
-        // Truncate to the configured artifact limit.
-        let results: Vec<_> = results.into_iter().take(self.config.max_artifacts).collect();
-
-        // Declare WriteMemory effects for each research artifact.
-        let scope = Scope::Custom("sweep".to_string());
-        let mut effects: Vec<Effect> = Vec::with_capacity(results.len());
-
-        for (i, result) in results.iter().enumerate() {
-            let artifact_key = format!(
-                "artifact:{}:{}:{}",
-                decision_id,
-                chrono::Utc::now().format("%Y%m%d"),
-                i
-            );
-            if let Ok(value) = serde_json::to_value(result) {
-                effects.push(Effect::WriteMemory {
-                    scope: scope.clone(),
-                    key: artifact_key,
-                    value,
-                    tier: Some(MemoryTier::Cold),
-                    lifetime: Some(Lifetime::Durable),
-                    content_kind: Some(ContentKind::Episodic),
-                    salience: Some(0.3),
-                    ttl: Some(DurationMs::from(Duration::from_secs(90 * 24 * 3600))),
-                });
-            }
-        }
-
-        // Serialize results as the output message.
-        let results_json =
-            serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
-        let mut output = OperatorOutput::new(Content::text(results_json), ExitReason::Complete);
-        output.effects = effects;
-        Ok(output)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Verdict JSON extraction helper
 // ---------------------------------------------------------------------------
@@ -352,13 +189,17 @@ fn extract_json_block(raw: &str) -> &str {
 
 /// Operator that compares research findings against a decision via an LLM [`Provider`].
 ///
-/// Dispatched by [`crate::workflow::run_sweep`] for step 6 of the sweep pipeline
-/// (comparison). Declares [`Effect::WriteMemory`] for sweep metadata and a delta
-/// entry (step 7) rather than writing to state directly.
+/// Context assembly is **turn-owned** (per D2A–D2E): the operator reads the
+/// decision card and prior sweep deltas from the state store during `execute()`,
+/// then combines them with the research results supplied in the input message.
+///
+/// Dispatched by [`crate::workflow::run_sweep`] for the comparison step.
+/// Declares [`Effect::WriteMemory`] for sweep metadata and a delta entry
+/// rather than writing to state directly.
 ///
 /// # Input
 ///
-/// - `input.message` — JSON-serialized `Vec<ResearchResult>` produced by [`ResearchOperator`].
+/// - `input.message` — JSON-serialized `Vec<ResearchResult>` supplied by the caller.
 /// - `input.metadata["decision_id"]` — string identifier for the decision under review.
 ///
 /// # Output
@@ -369,6 +210,8 @@ fn extract_json_block(raw: &str) -> &str {
 pub struct CompareOperator<P: Provider> {
     /// LLM provider used for verdict comparison.
     llm: P,
+    /// State store for reading decision cards and prior findings (read-only).
+    store: std::sync::Arc<dyn StateStore>,
     /// Operator configuration.
     pub config: SweepOperatorConfig,
 }
@@ -376,10 +219,10 @@ pub struct CompareOperator<P: Provider> {
 impl<P: Provider> CompareOperator<P> {
     /// Create a new compare operator.
     ///
-    /// Use [`neuron_provider_anthropic::AnthropicProvider::with_auth`] to wire
-    /// pi coding agent OAuth credentials directly.
-    pub fn new(llm: P, config: SweepOperatorConfig) -> Self {
-        Self { llm, config }
+    /// The `store` is used **read-only** to assemble context (decision card,
+    /// prior sweep deltas) during `execute()`. Writes are declared as effects.
+    pub fn new(llm: P, store: std::sync::Arc<dyn StateStore>, config: SweepOperatorConfig) -> Self {
+        Self { llm, store, config }
     }
 }
 
@@ -397,7 +240,7 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
             })?
             .to_string();
 
-        // Extract decision_id for effect keys and provider call.
+        // Extract decision_id for effect keys and context lookup.
         let decision_id = input
             .metadata
             .get("decision_id")
@@ -405,10 +248,48 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
             .unwrap_or("unknown")
             .to_string();
 
-        // Build an LLM request using the configured model.
+        // --- Turn-owned context assembly ---
+        // Read the decision card and prior sweep deltas from state.
+        let scope = Scope::Custom("sweep".to_string());
+        let reader = StoreAsReader(self.store.as_ref());
+        let assembler = neuron_context::ContextAssembler::new(
+            neuron_context::ContextAssemblyConfig::default(),
+        );
+        let context_messages = assembler
+            .assemble(&reader, &scope, &decision_id, None)
+            .await
+            .unwrap_or_default();
+
+        // Decision card (pinned, salience=1.0).
+        let decision_text = context_messages
+            .iter()
+            .filter(|m| m.source.as_deref() != Some("sweep:delta") && m.source.as_deref() != Some("sweep:fts"))
+            .filter(|m| m.salience == Some(1.0))
+            .filter_map(|m| m.message.content.first())
+            .filter_map(|c| match c {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .next()
+            .unwrap_or("[Decision text not available]");
+
+        // Prior sweep deltas.
+        let prior_findings: Vec<&str> = context_messages
+            .iter()
+            .filter(|m| m.source.as_deref() == Some("sweep:delta"))
+            .filter_map(|m| m.message.content.first())
+            .filter_map(|c| match c {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let prior_findings_json =
+            serde_json::to_string(&prior_findings).unwrap_or_else(|_| "[]".to_string());
+
+        // Build an LLM request with full context.
         let user_content = format!(
-            "Decision ID: {}\n\n<research>\n{}\n</research>",
-            decision_id, research_json
+            "Decision ID: {}\n\n<decision>\n{}\n</decision>\n\n<prior_findings>\n{}\n</prior_findings>\n\n<research>\n{}\n</research>",
+            decision_id, decision_text, prior_findings_json, research_json
         );
         let request = ProviderRequest {
             model: Some(self.config.model.clone()),
@@ -522,11 +403,23 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::MockProvider;
     use crate::types::{EvidenceItem, EvidenceStance, ProcessorTier};
     use neuron_turn::types::{ProviderResponse, StopReason, TokenUsage};
-    use std::sync::Arc;
     use layer0::operator::TriggerType;
+    use layer0::error::StateError;
+    use layer0::state::{SearchResult as StateSearchResult, StateStore};
+    use std::sync::Arc;
+
+    struct EmptyStore;
+
+    #[async_trait::async_trait]
+    impl StateStore for EmptyStore {
+        async fn read(&self, _s: &Scope, _k: &str) -> Result<Option<serde_json::Value>, StateError> { Ok(None) }
+        async fn write(&self, _s: &Scope, _k: &str, _v: serde_json::Value) -> Result<(), StateError> { Ok(()) }
+        async fn delete(&self, _s: &Scope, _k: &str) -> Result<(), StateError> { Ok(()) }
+        async fn list(&self, _s: &Scope, _p: &str) -> Result<Vec<String>, StateError> { Ok(vec![]) }
+        async fn search(&self, _s: &Scope, _q: &str, _l: usize) -> Result<Vec<StateSearchResult>, StateError> { Ok(vec![]) }
+    }
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -671,163 +564,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // research_with_retry_inner — free function
-    // -----------------------------------------------------------------------
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn research_with_retry_inner_succeeds_on_first_attempt() {
-        let mock = MockProvider::new(vec![dummy_result()]);
-        let result = research_with_retry_inner(&mock, "query", ProcessorTier::Base)
-            .await
-            .expect("should succeed");
-        assert_eq!(result.len(), 1);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn research_with_retry_inner_fails_twice_then_succeeds() {
-        tokio::time::pause();
-
-        let mock = MockProvider::new_failing(2, vec![dummy_result()]);
-        let handle = tokio::spawn(async move {
-            research_with_retry_inner(&mock, "test query", ProcessorTier::Base).await
-        });
-
-        // Advance past the 1 s backoff after attempt 0.
-        tokio::time::advance(Duration::from_secs(2)).await;
-        // Advance past the 4 s backoff after attempt 1.
-        tokio::time::advance(Duration::from_secs(5)).await;
-
-        let result = handle.await.expect("task panicked");
-        assert!(result.is_ok(), "expected success after 2 failures: {:?}", result);
-        assert_eq!(result.unwrap().len(), 1);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn research_with_retry_inner_permanent_error_fails_immediately() {
-        struct PermanentErrorProvider;
-
-        #[async_trait::async_trait]
-        impl ResearchProvider for PermanentErrorProvider {
-            async fn search(
-                &self,
-                _query: &str,
-                _processor: ProcessorTier,
-            ) -> Result<Vec<ResearchResult>, SweepError> {
-                Err(SweepError::Permanent("400 bad request".to_string()))
-            }
-        }
-
-        let err = research_with_retry_inner(&PermanentErrorProvider, "q", ProcessorTier::Base)
-            .await
-            .unwrap_err();
-        assert!(!err.is_transient(), "Permanent error should not be retried");
-        assert!(matches!(err, SweepError::Permanent(_)), "expected Permanent, got {:?}", err);
-    }
-
-    // -----------------------------------------------------------------------
-    // ResearchOperator — Operator trait impl
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn research_operator_returns_results_json() {
-        let mock = MockProvider::new(vec![dummy_result()]);
-        let op = ResearchOperator::new(Box::new(mock), SweepOperatorConfig::default());
-
-        let mut input = OperatorInput::new(Content::text("test query"), TriggerType::Task);
-        input.metadata = serde_json::json!({
-            "processor": "base",
-            "decision_id": "topic-3b",
-        });
-
-        let output = op.execute(input).await.expect("execute should succeed");
-        let text = output.message.as_text().expect("output should be text");
-        let results: Vec<ResearchResult> =
-            serde_json::from_str(text).expect("output should be valid JSON");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].url, "https://example.com/paper");
-    }
-
-    #[tokio::test]
-    async fn research_operator_declares_write_memory_effects() {
-        let mock = MockProvider::new(vec![dummy_result(), dummy_result()]);
-        let op = ResearchOperator::new(Box::new(mock), SweepOperatorConfig::default());
-
-        let mut input = OperatorInput::new(Content::text("test query"), TriggerType::Task);
-        input.metadata = serde_json::json!({
-            "processor": "base",
-            "decision_id": "topic-3b",
-        });
-
-        let output = op.execute(input).await.expect("execute should succeed");
-
-        // Each result should produce one WriteMemory effect.
-        assert_eq!(
-            output.effects.len(),
-            2,
-            "expected 2 WriteMemory effects (one per result)"
-        );
-        for effect in &output.effects {
-            assert!(
-                matches!(effect, Effect::WriteMemory { .. }),
-                "all effects must be WriteMemory, got {:?}",
-                effect
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn research_operator_returns_no_effects_for_empty_results() {
-        let mock = MockProvider::new(vec![]);
-        let op = ResearchOperator::new(Box::new(mock), SweepOperatorConfig::default());
-
-        let mut input = OperatorInput::new(Content::text("test query"), TriggerType::Task);
-        input.metadata = serde_json::json!({
-            "processor": "base",
-            "decision_id": "topic-3b",
-        });
-
-        let output = op.execute(input).await.expect("execute should succeed");
-        assert!(
-            output.effects.is_empty(),
-            "no effects when research returns empty"
-        );
-        let text = output.message.as_text().unwrap_or("");
-        let results: Vec<ResearchResult> = serde_json::from_str(text).unwrap_or_default();
-        assert!(results.is_empty());
-    }
-
-    #[tokio::test]
-    async fn research_operator_returns_decision_not_found_sentinel() {
-        struct NotFoundProvider;
-
-        #[async_trait::async_trait]
-        impl ResearchProvider for NotFoundProvider {
-            async fn search(
-                &self,
-                _query: &str,
-                _processor: ProcessorTier,
-            ) -> Result<Vec<ResearchResult>, SweepError> {
-                Err(SweepError::DecisionNotFound("D9X".to_string()))
-            }
-        }
-
-        let op = ResearchOperator::new(Box::new(NotFoundProvider), SweepOperatorConfig::default());
-        let mut input = OperatorInput::new(Content::text("q"), TriggerType::Task);
-        input.metadata = serde_json::json!({"decision_id": "D9X"});
-
-        let output = op.execute(input).await.expect("execute should not error");
-        let text = output.message.as_text().unwrap_or("");
-        assert!(
-            text.starts_with("DECISION_NOT_FOUND:"),
-            "expected sentinel, got: {text}"
-        );
-        assert!(
-            output.effects.is_empty(),
-            "no effects when decision not found"
-        );
-    }
-
-    // -----------------------------------------------------------------------
     // CompareOperator — Operator trait impl
     // -----------------------------------------------------------------------
 
@@ -836,7 +572,7 @@ mod tests {
     async fn compare_operator_returns_verdict_json() {
         let expected = dummy_verdict("topic-3b");
         let mock = MockLlmProvider { verdict: expected.clone() };
-        let op = CompareOperator::new(mock, SweepOperatorConfig::default());
+        let op = CompareOperator::new(mock, Arc::new(EmptyStore), SweepOperatorConfig::default());
 
         let research = serde_json::to_string(&vec![dummy_result()]).unwrap();
         let mut input = OperatorInput::new(Content::text(research), TriggerType::Task);
@@ -852,7 +588,7 @@ mod tests {
     #[tokio::test]
     async fn compare_operator_declares_write_memory_effects() {
         let mock = MockLlmProvider { verdict: dummy_verdict("topic-3b") };
-        let op = CompareOperator::new(mock, SweepOperatorConfig::default());
+        let op = CompareOperator::new(mock, Arc::new(EmptyStore), SweepOperatorConfig::default());
 
         let research = serde_json::to_string(&vec![dummy_result()]).unwrap();
         let mut input = OperatorInput::new(Content::text(research), TriggerType::Task);

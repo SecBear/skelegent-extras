@@ -16,9 +16,8 @@ use neuron_effects_git::{PrAction, route_verdict};
 use layer0::id::AgentId;
 use layer0::test_utils::LocalOrchestrator;
 use neuron_op_sweep::{
-    CompareOperator, EvidenceItem, EvidenceStance, ProcessorTier, ResearchOperator,
-    ResearchProvider, ResearchResult, SweepError, SweepOperatorConfig, SweepVerdict,
-    VerdictStatus, run_sweep,
+    CompareOperator, EvidenceItem, EvidenceStance, ProcessorTier, ResearchResult,
+    SweepOperatorConfig, SweepVerdict, VerdictStatus, run_sweep,
 };
 use neuron_orch_sweep::{
     BudgetConfig, BudgetState, CycleReport, OrchestratorConfig, QueuedDecision, run_cycle,
@@ -71,26 +70,16 @@ impl StateStore for RecordingStore {
 }
 
 // ---------------------------------------------------------------------------
-// Test provider — returns realistic verdicts based on decision ID
+// Test helper — returns a single research result for use in tests
 // ---------------------------------------------------------------------------
 
-struct TestProvider;
-
-#[async_trait]
-impl ResearchProvider for TestProvider {
-    async fn search(
-        &self,
-        _query: &str,
-        _processor: ProcessorTier,
-    ) -> Result<Vec<ResearchResult>, SweepError> {
-        Ok(vec![ResearchResult {
-            url: "https://example.com/paper".to_string(),
-            title: "Agent Architecture 2026".to_string(),
-            snippet: "Key findings about agent systems.".to_string(),
-            retrieved_at: chrono::Utc::now().to_rfc3339(),
-        }])
+fn test_research_result() -> ResearchResult {
+    ResearchResult {
+        url: "https://example.com/paper".to_string(),
+        title: "Agent Architecture 2026".to_string(),
+        snippet: "Key findings about agent systems.".to_string(),
+        retrieved_at: chrono::Utc::now().to_rfc3339(),
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -222,15 +211,14 @@ async fn smoke_full_cycle_with_three_decisions() {
             let s = Arc::clone(&store_clone);
             Box::pin(async move {
                 let mut orch = LocalOrchestrator::new();
-                let research_id = AgentId::new("research");
                 let compare_id = AgentId::new("compare");
                 let cfg = SweepOperatorConfig {
                     min_sweep_interval: Duration::from_secs(0),
                     ..SweepOperatorConfig::default()
                 };
-                orch.register(research_id.clone(), Arc::new(ResearchOperator::new(Box::new(TestProvider), cfg.clone())));
-                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, cfg)));
-                run_sweep(&orch, &research_id, &compare_id, &id, prev, 8.0, 10.0, s.as_ref())
+                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, Arc::clone(&s) as Arc<dyn StateStore>, cfg)));
+                let results = vec![test_research_result()];
+                run_sweep(&orch, &compare_id, &id, &results, prev, 8.0, 10.0, s.as_ref())
                     .await
                     .unwrap_or_else(|e| panic!("operator failed for {id}: {e}"))
             })
@@ -320,12 +308,11 @@ async fn smoke_budget_exhaustion_stops_cycle() {
             let s = Arc::clone(&store_clone);
             Box::pin(async move {
                 let mut orch = LocalOrchestrator::new();
-                let research_id = AgentId::new("research");
                 let compare_id = AgentId::new("compare");
                 let cfg = SweepOperatorConfig::default();
-                orch.register(research_id.clone(), Arc::new(ResearchOperator::new(Box::new(TestProvider), cfg.clone())));
-                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, cfg)));
-                run_sweep(&orch, &research_id, &compare_id, &id, prev, 0.004, 0.10, s.as_ref())
+                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, Arc::clone(&s) as Arc<dyn StateStore>, cfg)));
+                let results = vec![test_research_result()];
+                run_sweep(&orch, &compare_id, &id, &results, prev, 0.004, 0.10, s.as_ref())
                     .await
                     .unwrap_or_else(|e| panic!("operator failed: {e}"))
             })
