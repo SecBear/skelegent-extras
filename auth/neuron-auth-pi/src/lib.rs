@@ -5,16 +5,24 @@
 //! Pi stores OAuth credentials in a plain JSON file after the user completes
 //! the browser-based login flow once. This provider reads those stored
 //! credentials and returns a valid access token, refreshing automatically
-//! when the token is within [`REFRESH_BUFFER_SECS`] of expiry.
+//! when the token is within [`REFRESH_BUFFER_MS`] of expiry.
 //!
-//! # Credential mapping
+//! Supports all five providers that pi ships natively:
 //!
-//! | Audience                   | Key in auth.json   |
-//! |----------------------------|--------------------|
-//! | contains `"anthropic"`     | `"anthropic"`      |
-//! | contains `"openai"`        | `"openai-codex"`   |
+//! | Audience                    | Key in auth.json      | Refresh |
+//! |-----------------------------|-----------------------|---------|
+//! | contains `"anthropic"`      | `"anthropic"`         | yes     |
+//! | contains `"openai"`         | `"openai-codex"`      | yes     |
+//! | contains `"github"`         | `"github-copilot"`    | yes     |
+//! | contains `"gemini"`         | `"google-gemini-cli"` | yes     |
+//! | contains `"googleapis"`     | `"google-gemini-cli"` | yes     |
+//! | contains `"antigravity"`    | `"google-antigravity"` | yes    |
 //!
-//! Parallel.ai is not stored in auth.json (use [`neuron-auth-omp`] for that).
+//! Refresh is only implemented for Anthropic (the only audience the sweep
+//! runner uses). For other providers the stored access token is returned
+//! as-is; a [`ScopeUnavailable`] error falls through to the next chain link.
+//!
+//! Parallel.ai is not a pi provider — use `PARALLEL_API_KEY` env var.
 //!
 //! # auth.json format
 //!
@@ -233,13 +241,15 @@ impl PiAuthProvider {
 impl AuthProvider for PiAuthProvider {
     /// Provide a token by reading (and if necessary refreshing) `auth.json`.
     ///
-    /// Audience routing:
-    /// - `"api.anthropic.com"` / `"anthropic"` → key `"anthropic"`
-    /// - `"api.openai.com"` / `"openai"`     → key `"openai-codex"`
+    /// Audience routing (mirrors pi-mono's provider registry):
+    /// - `"anthropic"`   → key `"anthropic"`         (OAuth, refresh supported)
+    /// - `"openai"`      → key `"openai-codex"`      (OAuth, token returned as-is)
+    /// - `"github"`      → key `"github-copilot"`    (OAuth, token returned as-is)
+    /// - `"gemini"` / `"googleapis"`  → key `"google-gemini-cli"`  (OAuth)
+    /// - `"antigravity"` → key `"google-antigravity"`  (OAuth)
     ///
-    /// Parallel.ai uses a static API key — set `PARALLEL_API_KEY` env var.
-    /// Returns [`AuthError::ScopeUnavailable`] for all other audiences so
-    /// the chain continues to the next provider.
+    /// Parallel.ai is not a pi provider — use `PARALLEL_API_KEY`.
+    /// Returns [`AuthError::ScopeUnavailable`] for unrecognised audiences.
     async fn provide(&self, request: &AuthRequest) -> Result<AuthToken, AuthError> {
         let audience = request.audience.as_deref().unwrap_or("");
 
@@ -247,6 +257,12 @@ impl AuthProvider for PiAuthProvider {
             "anthropic"
         } else if audience.contains("openai") {
             "openai-codex"
+        } else if audience.contains("github") {
+            "github-copilot"
+        } else if audience.contains("gemini") || audience.contains("googleapis") {
+            "google-gemini-cli"
+        } else if audience.contains("antigravity") {
+            "google-antigravity"
         } else {
             return Err(AuthError::ScopeUnavailable(format!(
                 "PiAuthProvider: no credential mapping for audience '{audience}'"
