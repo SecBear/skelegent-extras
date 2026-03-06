@@ -17,8 +17,18 @@ use layer0::{
 };
 
 use crate::types::{ProcessorTier, SweepMeta, SweepVerdict, VerdictStatus};
+use crate::provider::CompareInput;
 use neuron_turn::provider::{Provider, ProviderError};
 use neuron_turn::types::{ContentPart, ProviderMessage, ProviderRequest, Role};
+
+// ---------------------------------------------------------------------------
+// Scope constant
+// ---------------------------------------------------------------------------
+
+/// Canonical scope name for all sweep state (decision cards, sweep metadata,
+/// and delta entries).
+pub const SWEEP_SCOPE: &str = "sweep";
+
 
 // ---------------------------------------------------------------------------
 // StoreAsReader adapter
@@ -229,28 +239,28 @@ impl<P: Provider> CompareOperator<P> {
 #[async_trait::async_trait]
 impl<P: Provider + 'static> Operator for CompareOperator<P> {
     async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
-        // Extract the research JSON from the input message.
-        let research_json = input
+        // Parse the typed input — both research results and decision_id come
+        // from the CompareInput struct embedded in the message.
+        let msg_text = input
             .message
             .as_text()
             .ok_or_else(|| {
                 OperatorError::NonRetryable(
-                    "CompareOperator: input.message must be text containing research JSON".into(),
+                    "CompareOperator: input.message must be text containing CompareInput JSON".into(),
                 )
-            })?
-            .to_string();
-
-        // Extract decision_id for effect keys and context lookup.
-        let decision_id = input
-            .metadata
-            .get("decision_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+            })?;
+        let compare_in: CompareInput = serde_json::from_str(msg_text).map_err(|e| {
+            OperatorError::NonRetryable(format!(
+                "CompareOperator: failed to parse CompareInput: {e}"
+            ))
+        })?;
+        let research_json = serde_json::to_string(&compare_in.research_results)
+            .unwrap_or_else(|_| "[]".to_string());
+        let decision_id = compare_in.decision_id;
 
         // --- Turn-owned context assembly ---
         // Read the decision card and prior sweep deltas from state.
-        let scope = Scope::Custom("sweep".to_string());
+        let scope = Scope::Custom(SWEEP_SCOPE.to_string());
         let reader = StoreAsReader(self.store.as_ref());
         let assembler = neuron_context::ContextAssembler::new(
             neuron_context::ContextAssemblyConfig::default(),
@@ -341,7 +351,7 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
         };
 
         // Declare WriteMemory effects for sweep metadata and delta.
-        let scope = Scope::Custom("sweep".to_string());
+        let scope = Scope::Custom(SWEEP_SCOPE.to_string());
         let meta_key = format!("meta:{}:last_sweep", decision_id);
         let meta = SweepMeta {
             swept_at: chrono::Utc::now().to_rfc3339(),
@@ -574,9 +584,12 @@ mod tests {
         let mock = MockLlmProvider { verdict: expected.clone() };
         let op = CompareOperator::new(mock, Arc::new(EmptyStore), SweepOperatorConfig::default());
 
-        let research = serde_json::to_string(&vec![dummy_result()]).unwrap();
-        let mut input = OperatorInput::new(Content::text(research), TriggerType::Task);
-        input.metadata = serde_json::json!({"decision_id": "topic-3b"});
+        let compare_in = crate::provider::CompareInput {
+            research_results: vec![dummy_result()],
+            decision_id: "topic-3b".to_string(),
+        };
+        let msg = serde_json::to_string(&compare_in).unwrap();
+        let input = OperatorInput::new(Content::text(msg), TriggerType::Task);
 
         let output = op.execute(input).await.expect("execute should succeed");
         let text = output.message.as_text().expect("output should be text");
@@ -590,9 +603,12 @@ mod tests {
         let mock = MockLlmProvider { verdict: dummy_verdict("topic-3b") };
         let op = CompareOperator::new(mock, Arc::new(EmptyStore), SweepOperatorConfig::default());
 
-        let research = serde_json::to_string(&vec![dummy_result()]).unwrap();
-        let mut input = OperatorInput::new(Content::text(research), TriggerType::Task);
-        input.metadata = serde_json::json!({"decision_id": "topic-3b"});
+        let compare_in = crate::provider::CompareInput {
+            research_results: vec![dummy_result()],
+            decision_id: "topic-3b".to_string(),
+        };
+        let msg = serde_json::to_string(&compare_in).unwrap();
+        let input = OperatorInput::new(Content::text(msg), TriggerType::Task);
 
         let output = op.execute(input).await.expect("execute should succeed");
 

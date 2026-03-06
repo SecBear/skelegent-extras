@@ -18,9 +18,11 @@
 use std::time::Instant;
 
 use layer0::operator::TriggerType;
-use layer0::{AgentId, Content, OperatorInput, Orchestrator, Scope, StateStore};
+use layer0::{AgentId, Orchestrator, Scope, StateStore};
+use neuron_orch_kit::{dispatch_typed, DispatchError};
 
-use crate::provider::{ResearchResult, SweepError};
+use crate::operator::SWEEP_SCOPE;
+use crate::provider::{CompareInput, ResearchResult, SweepError};
 use crate::types::{ProcessorTier, SweepMeta, SweepVerdict, VerdictStatus};
 
 /// Sequence the sweep pipeline for one decision via an [`Orchestrator`].
@@ -62,7 +64,7 @@ pub async fn run_sweep(
     store: &dyn StateStore,
 ) -> Result<SweepVerdict, SweepError> {
     let start = Instant::now();
-    let scope = Scope::Custom("sweep".to_string());
+    let scope = Scope::Custom(SWEEP_SCOPE.to_string());
 
     // ------------------------------------------------------------------
     // Step 1: DEDUP CHECK
@@ -149,41 +151,41 @@ pub async fn run_sweep(
     // Step 5: DISPATCH COMPARE OPERATOR
     // Context assembly happens inside CompareOperator::execute() (turn-owned).
     // ------------------------------------------------------------------
-    let research_json =
-        serde_json::to_string(research_results).unwrap_or_else(|_| "[]".to_string());
+    let compare_in = CompareInput {
+        research_results: research_results.to_vec(),
+        decision_id: decision_id.to_string(),
+    };
 
-    let mut compare_input = OperatorInput::new(Content::text(research_json), TriggerType::Task);
-    compare_input.metadata = serde_json::json!({
-        "decision_id": decision_id,
-    });
-
-    let compare_output = orch
-        .dispatch(compare_agent, compare_input)
-        .await
-        .map_err(|e| SweepError::Permanent(e.to_string()))?;
-
-    // Parse compare output.
-    let verdict_text = compare_output.message.as_text().unwrap_or("");
-
-    if verdict_text.starts_with("DECISION_NOT_FOUND:") {
-        return Ok(SweepVerdict {
-            decision_id: decision_id.to_string(),
-            status: VerdictStatus::Skipped,
-            confidence: 0.0,
-            num_supporting: 0,
-            num_contradicting: 0,
-            cost_usd: 0.0,
-            processor,
-            duration_secs: start.elapsed().as_secs_f64(),
-            swept_at: chrono::Utc::now().to_rfc3339(),
-            evidence: vec![],
-            narrative: format!("Decision {decision_id} not found during comparison"),
-            proposed_diff: None,
-        });
-    }
-
-    let verdict: SweepVerdict = serde_json::from_str(verdict_text)
-        .map_err(|e| SweepError::Permanent(format!("compare output parse failed: {e}")))?;
+    let verdict = match dispatch_typed::<CompareInput, SweepVerdict>(
+        orch,
+        compare_agent,
+        compare_in,
+        TriggerType::Task,
+    )
+    .await
+    {
+        Ok((verdict, _output)) => verdict,
+        Err(DispatchError::DeserializeOutput(msg)) => {
+            // The operator returned a non-JSON response. This covers the
+            // hypothetical DECISION_NOT_FOUND prefix and any other malformed
+            // output. Return Skipped rather than propagating a parse error.
+            return Ok(SweepVerdict {
+                decision_id: decision_id.to_string(),
+                status: VerdictStatus::Skipped,
+                confidence: 0.0,
+                num_supporting: 0,
+                num_contradicting: 0,
+                cost_usd: 0.0,
+                processor,
+                duration_secs: start.elapsed().as_secs_f64(),
+                swept_at: chrono::Utc::now().to_rfc3339(),
+                evidence: vec![],
+                narrative: format!("Comparison step returned non-verdict response: {msg}"),
+                proposed_diff: None,
+            });
+        }
+        Err(e) => return Err(SweepError::Permanent(e.to_string())),
+    };
 
     // ------------------------------------------------------------------
     // Step 6: EMIT

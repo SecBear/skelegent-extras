@@ -25,3 +25,4 @@ neuron-effects-git = { path = "../../effects/neuron-effects-git", version = "0.4
 
 neuron-turn = { path = "../../../neuron/turn/neuron-turn", version = "0.4.0" }
 layer0 = { path = "../../../neuron/layer0", version = "0.4.0", features = ["test-utils"] }
+neuron-orch-kit = { path = "../neuron-orch-kit", version = "0.1.0" }

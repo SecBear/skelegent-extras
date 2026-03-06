@@ -55,6 +55,20 @@ impl SweepError {
     }
 }
 
+/// Typed input for [`crate::operator::CompareOperator`].
+///
+/// Bundles research results with the decision ID into a single serializable
+/// struct. [`crate::workflow::run_sweep`] passes this to `dispatch_typed` so
+/// both the message body and the `metadata["decision_id"]` field are derived
+/// from a single source of truth.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompareInput {
+    /// Research results to compare against the decision.
+    pub research_results: Vec<ResearchResult>,
+    /// Identifier of the decision under review.
+    pub decision_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -20,6 +20,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
+neuron-orch-kit = { path = "../../orch/neuron-orch-kit", version = "0.1.0" }
 
 [dev-dependencies]
 layer0 = { path = "../../../neuron/layer0", features = ["test-utils"] }

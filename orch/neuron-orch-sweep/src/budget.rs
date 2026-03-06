@@ -3,6 +3,24 @@
 //! The budget system tracks daily USD spend and enforces three degradation
 //! tiers — [`DegradationLevel::Normal`], [`DegradationLevel::Degraded`], and
 //! [`DegradationLevel::HardStop`] — to protect against runaway costs.
+//!
+//! # Relationship to `neuron-orch-kit`
+//!
+//! `neuron-orch-kit` provides a generic [`neuron_orch_kit::BudgetTracker`] with
+//! atomic microdollar tracking and a [`neuron_orch_kit::BudgetDecision`] enum.
+//! The sweep budget is NOT migrated to use it because the two systems serve
+//! different concerns:
+//!
+//! - **Sweep budget**: daily-reset USD cap, per-decision cost history,
+//!   degradation levels that affect scheduler behaviour across multiple decisions.
+//! - **orch-kit BudgetTracker**: per-session or per-operator atomic counters with
+//!   a simple Allow/Degraded/Deny policy.
+//!
+//! The sweep [`DegradationLevel`] enum (Normal/Degraded/HardStop) is structurally
+//! different from `BudgetDecision` (Allow/Degraded{reason}/Deny{reason}) and
+//! the `reason` string field has no equivalent here. Forcing alignment would
+//! require changing the public API of this crate and every caller without
+//! meaningful benefit. Leave both systems independent.
 
 use std::collections::HashMap;
 
