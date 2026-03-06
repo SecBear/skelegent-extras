@@ -389,4 +389,80 @@ mod tests {
             panic!("expected oauth entry");
         }
     }
+
+    // ── Additional audience routing coverage ───────────────────────────────
+
+    #[tokio::test]
+    async fn github_audience_resolves() {
+        let expires_future = now_epoch_ms() + 60 * 60 * 1000;
+        let json = serde_json::json!({
+            "github-copilot": {
+                "type": "oauth",
+                "access": "ghu_test_token",
+                "refresh": "ref",
+                "expires": expires_future
+            }
+        });
+        let f = write_auth_json(json);
+        let provider = PiAuthProvider::new(f.path());
+        let req = AuthRequest::new().with_audience("api.github.com");
+        let token = provider.provide(&req).await.unwrap();
+        let key = token.with_bytes(|b| String::from_utf8_lossy(b).into_owned());
+        assert_eq!(key, "ghu_test_token");
+    }
+
+    #[tokio::test]
+    async fn gemini_audience_resolves() {
+        let expires_future = now_epoch_ms() + 60 * 60 * 1000;
+        let json = serde_json::json!({
+            "google-gemini-cli": {
+                "type": "oauth",
+                "access": "ya29_gemini",
+                "refresh": "ref",
+                "expires": expires_future
+            }
+        });
+        let f = write_auth_json(json);
+        let provider = PiAuthProvider::new(f.path());
+        // both audience strings route to the same key
+        for audience in ["generativelanguage.googleapis.com", "gemini.api"] {
+            let req = AuthRequest::new().with_audience(audience);
+            let token = provider.provide(&req).await.unwrap();
+            let key = token.with_bytes(|b| String::from_utf8_lossy(b).into_owned());
+            assert_eq!(key, "ya29_gemini", "audience: {audience}");
+        }
+    }
+
+    #[tokio::test]
+    async fn antigravity_audience_resolves() {
+        let expires_future = now_epoch_ms() + 60 * 60 * 1000;
+        let json = serde_json::json!({
+            "google-antigravity": {
+                "type": "oauth",
+                "access": "ya29_ag",
+                "refresh": "ref",
+                "expires": expires_future
+            }
+        });
+        let f = write_auth_json(json);
+        let provider = PiAuthProvider::new(f.path());
+        let req = AuthRequest::new().with_audience("antigravity.google.com");
+        let token = provider.provide(&req).await.unwrap();
+        let key = token.with_bytes(|b| String::from_utf8_lossy(b).into_owned());
+        assert_eq!(key, "ya29_ag");
+    }
+
+    #[tokio::test]
+    async fn unrecognised_audience_falls_through() {
+        // Even with a valid file, an unknown audience is ScopeUnavailable so
+        // the chain can hand off to the next provider.
+        let json = serde_json::json!({
+            "anthropic": {"type": "api_key", "key": "sk-x"}
+        });
+        let f = write_auth_json(json);
+        let provider = PiAuthProvider::new(f.path());
+        let req = AuthRequest::new().with_audience("parallel.ai");
+        let err = provider.provide(&req).await.unwrap_err();
+        assert!(matches!(err, neuron_auth::AuthError::ScopeUnavailable(_)));
+    }
 }
