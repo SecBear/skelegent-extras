@@ -18,7 +18,7 @@
 //!
 //! # async fn run() -> Result<(), neuron_client_parallel::ParallelError> {
 //! let client = ParallelClient::new("PARALLEL_API_KEY");
-//! let results = client.search("recent AI safety research", "core").await?;
+//! let results = client.search("recent AI safety research", "one-shot").await?;
 //! # Ok(())
 //! # }
 //! ```
