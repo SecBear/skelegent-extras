@@ -521,6 +521,7 @@ mod tests {
             swept_at: "2026-03-04T18:00:00Z".to_string(),
             evidence: vec![EvidenceItem {
                 source_url: "https://example.com".into(),
+                title: String::new(),
                 summary: "Supports decision".into(),
                 stance: EvidenceStance::Supporting,
                 retrieved_at: "2026-03-04T00:00:00Z".into(),

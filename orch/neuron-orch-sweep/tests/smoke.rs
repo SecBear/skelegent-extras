@@ -131,6 +131,7 @@ impl Provider for TestLlm {
             swept_at: chrono::Utc::now().to_rfc3339(),
             evidence: vec![EvidenceItem {
                 source_url: "https://example.com".into(),
+                title: String::new(),
                 summary: "Test evidence".into(),
                 stance: EvidenceStance::Supporting,
                 retrieved_at: chrono::Utc::now().to_rfc3339(),

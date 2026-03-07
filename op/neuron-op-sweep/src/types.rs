@@ -35,11 +35,15 @@ pub enum EvidenceStance {
 pub struct EvidenceItem {
     /// Source URL (research report, paper, repository, or blog post).
     pub source_url: String,
+    /// Short title of the source (may be omitted by LLM).
+    #[serde(default)]
+    pub title: String,
     /// One-line summary of what this source says.
     pub summary: String,
     /// Whether this source supports, contradicts, or is neutral toward the decision.
     pub stance: EvidenceStance,
     /// RFC 3339 timestamp of when this source was retrieved.
+    #[serde(default)]
     pub retrieved_at: String,
 }
 
@@ -170,6 +174,7 @@ mod tests {
             swept_at: "2026-03-04T18:00:00Z".to_string(),
             evidence: vec![EvidenceItem {
                 source_url: "https://example.com/paper".to_string(),
+                title: String::new(),
                 summary: "Confirms the approach".to_string(),
                 stance: EvidenceStance::Supporting,
                 retrieved_at: "2026-03-04T17:55:00Z".to_string(),
@@ -200,6 +205,7 @@ mod tests {
     fn evidence_item_serde_round_trip() {
         let item = EvidenceItem {
             source_url: "https://example.com".to_string(),
+            title: String::new(),
             summary: "Supports claim X".to_string(),
             stance: EvidenceStance::Contradicting,
             retrieved_at: "2026-03-04T00:00:00Z".to_string(),

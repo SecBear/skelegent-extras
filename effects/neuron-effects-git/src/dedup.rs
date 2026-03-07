@@ -112,6 +112,7 @@ mod tests {
                 .iter()
                 .map(|url| EvidenceItem {
                     source_url: url.to_string(),
+                    title: String::new(),
                     summary: "test evidence".to_string(),
                     stance: EvidenceStance::Supporting,
                     retrieved_at: "2026-03-04T11:55:00Z".to_string(),
