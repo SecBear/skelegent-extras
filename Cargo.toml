@@ -12,6 +12,7 @@ members = [
   "auth/neuron-auth-pi",
   "auth/neuron-auth-omp",
   "client/neuron-client-parallel",
+  "bin/sweep-runner",
 ]
 
 [workspace.package]

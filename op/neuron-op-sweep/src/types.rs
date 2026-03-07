@@ -47,7 +47,7 @@ pub struct EvidenceItem {
 ///
 /// Higher tiers use more capable (and more expensive) models.
 /// The operator selects the tier based on budget and previous verdict.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessorTier {
     /// Lowest cost. Used for routine sweeps when budget is below 80%.
@@ -55,13 +55,8 @@ pub enum ProcessorTier {
     /// Mid-tier. Used for refined decisions and budget-constrained challenged decisions.
     Core,
     /// Highest capability. Used for challenged decisions when budget allows.
+    #[default]
     Ultra,
-}
-
-impl Default for ProcessorTier {
-    fn default() -> Self {
-        Self::Ultra
-    }
 }
 
 /// Complete verdict produced by one sweep operator run.

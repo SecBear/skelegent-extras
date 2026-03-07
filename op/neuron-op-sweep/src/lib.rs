@@ -44,6 +44,7 @@ pub mod provider;
 pub mod synthesis;
 pub mod synthesis_operator;
 pub mod types;
+pub mod queries;
 
 pub use compare::*;
 pub use cost::*;
@@ -52,3 +53,4 @@ pub use provider::*;
 pub use synthesis::*;
 pub use synthesis_operator::{SynthesisInput, SynthesisOperator};
 pub use types::*;
+pub use queries::{DecisionQuery, next_query, queries_for};
