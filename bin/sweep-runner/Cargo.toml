@@ -19,6 +19,9 @@ neuron-orch-kit = { path = "../../orch/neuron-orch-kit" }
 neuron-client-parallel = { path = "../../client/neuron-client-parallel" }
 neuron-state-sqlite = { path = "../../state/neuron-state-sqlite" }
 neuron-provider-anthropic = { path = "../../../neuron/provider/neuron-provider-anthropic" }
+neuron-auth = { path = "../../../neuron/auth/neuron-auth", version = "0.4.0" }
+neuron-auth-pi = { path = "../../auth/neuron-auth-pi" }
+neuron-auth-omp = { path = "../../auth/neuron-auth-omp" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
