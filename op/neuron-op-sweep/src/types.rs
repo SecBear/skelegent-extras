@@ -51,11 +51,14 @@ pub struct EvidenceItem {
 #[serde(rename_all = "snake_case")]
 pub enum ProcessorTier {
     /// Lowest cost. Used for routine sweeps when budget is below 80%.
+    #[serde(alias = "Base")]
     Base,
     /// Mid-tier. Used for refined decisions and budget-constrained challenged decisions.
+    #[serde(alias = "Core")]
     Core,
     /// Highest capability. Used for challenged decisions when budget allows.
     #[default]
+    #[serde(alias = "Ultra")]
     Ultra,
 }
 

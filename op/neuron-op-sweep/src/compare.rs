@@ -47,7 +47,7 @@ Compare the research findings against the existing decision and produce a struct
   "num_supporting": 3,
   "num_contradicting": 0,
   "cost_usd": 0.0,
-  "processor": "Ultra",
+  "processor": "ultra",
   "duration_secs": 0.0,
   "swept_at": "2026-01-01T00:00:00Z",
   "evidence": [
