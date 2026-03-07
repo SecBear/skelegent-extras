@@ -86,13 +86,32 @@ pub struct SearchResult {
 /// Parallel.ai search response envelope.
 #[derive(Deserialize)]
 struct SearchResponse {
-    results: Vec<SearchResult>,
+    #[serde(default)]
+    results: Vec<SearchResponseResult>,
+}
+
+/// Individual result from search API (differs from public SearchResult).
+#[derive(Deserialize)]
+struct SearchResponseResult {
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    excerpts: Vec<SearchExcerpt>,
+}
+
+/// Text excerpt from a search result.
+#[derive(Deserialize)]
+struct SearchExcerpt {
+    #[serde(default)]
+    text: String,
 }
 
 /// Parallel.ai task creation response.
 #[derive(Deserialize)]
 struct TaskRunResponse {
-    id: String,
+    run_id: String,
     #[allow(dead_code)]
     status: String,
 }
@@ -163,16 +182,16 @@ impl ParallelClient {
     ///   key. Used as the fallback when no [`AuthProvider`] is configured.
     ///
     /// Default endpoints:
-    /// - search: `https://api.parallel.ai/v1/search`
-    /// - task: `https://api.parallel.ai/v1/tasks/runs`
+    /// - search: `https://api.parallel.ai/v1beta/search`
+    /// - task: `https://api.parallel.ai/v1beta/tasks/runs`
     /// - extract: `https://api.parallel.ai/v1beta/extract`
     ///
     /// Default polling: 30 attempts × 5 s interval.
     pub fn new(api_key_var: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
-            search_url: "https://api.parallel.ai/v1/search".into(),
-            task_url: "https://api.parallel.ai/v1/tasks/runs".into(),
+            search_url: "https://api.parallel.ai/v1beta/search".into(),
+            task_url: "https://api.parallel.ai/v1beta/tasks/runs".into(),
             extract_url: "https://api.parallel.ai/v1beta/extract".into(),
             max_poll_attempts: 30,
             poll_interval: Duration::from_secs(5),
@@ -221,25 +240,33 @@ impl ParallelClient {
 
     // -- public async API --
 
-    /// Search Parallel.ai synchronously (immediate results, no polling).
+    /// Search Parallel.ai (immediate results, no polling).
     ///
-    /// POSTs to the search endpoint with `query` and `processor` and returns
-    /// the result list directly.
+    /// POSTs to the search endpoint with `objective` and returns the result
+    /// list directly. The `mode` parameter maps to Parallel.ai search modes:
+    /// `"one-shot"` (comprehensive), `"agentic"` (concise), `"fast"` (low-latency).
     pub async fn search(
         &self,
         query: &str,
-        processor: &str,
+        mode: &str,
     ) -> Result<Vec<SearchResult>, ParallelError> {
         let key = self.resolve_key().await?;
         let body = serde_json::json!({
-            "query": query,
-            "processor": processor,
+            "objective": query,
+            "mode": mode,
+            "max_results": 10,
+            "excerpts": { "max_chars_per_result": 2000 },
         });
+
+        let retrieved_at = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
 
         let resp = self
             .client
             .post(&self.search_url)
-            .header("Authorization", format!("Bearer {key}"))
+            .header("x-api-key", &key)
+            .header("parallel-beta", "search-extract-2025-10-10")
             .json(&body)
             .send()
             .await
@@ -251,7 +278,21 @@ impl ParallelClient {
 
         let parsed: SearchResponse = serde_json::from_str(&text)
             .map_err(|e| ParallelError::Permanent(format!("parse search response: {e}")))?;
-        Ok(parsed.results)
+
+        // Convert API-specific response to our public SearchResult type.
+        let results = parsed.results.into_iter().map(|r| {
+            let snippet = r.excerpts.into_iter()
+                .map(|e| e.text)
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            SearchResult {
+                url: r.url,
+                title: r.title,
+                snippet,
+                retrieved_at: retrieved_at.clone(),
+            }
+        }).collect();
+        Ok(results)
     }
 
     /// Submit a task to Parallel.ai and return the task ID.
@@ -265,14 +306,15 @@ impl ParallelClient {
     ) -> Result<String, ParallelError> {
         let key = self.resolve_key().await?;
         let body = serde_json::json!({
-            "query": query,
+            "input": query,
             "processor": processor,
+            "task_spec": { "type": "auto" },
         });
 
         let resp = self
             .client
             .post(&self.task_url)
-            .header("Authorization", format!("Bearer {key}"))
+            .header("x-api-key", &key)
             .json(&body)
             .send()
             .await
@@ -284,7 +326,7 @@ impl ParallelClient {
 
         let parsed: TaskRunResponse = serde_json::from_str(&text)
             .map_err(|e| ParallelError::Transient(format!("parse task response: {e}")))?;
-        Ok(parsed.id)
+        Ok(parsed.run_id)
     }
 
     /// Poll a single task by ID.
@@ -303,7 +345,7 @@ impl ParallelClient {
         let resp = self
             .client
             .get(format!("{}/{}", self.task_url, task_id))
-            .header("Authorization", format!("Bearer {key}"))
+            .header("x-api-key", &key)
             .send()
             .await
             .map_err(|e| ParallelError::Transient(e.to_string()))?;
@@ -359,12 +401,17 @@ impl ParallelClient {
     /// used. Empty title and text fields are preserved as-is.
     pub async fn extract(&self, url: &str) -> Result<SearchResult, ParallelError> {
         let key = self.resolve_key().await?;
-        let body = serde_json::json!({ "url": url });
+        let body = serde_json::json!({
+            "urls": [url],
+            "excerpts": true,
+            "full_content": true,
+        });
 
         let resp = self
             .client
             .post(&self.extract_url)
-            .header("Authorization", format!("Bearer {key}"))
+            .header("x-api-key", &key)
+            .header("parallel-beta", "search-extract-2025-10-10")
             .json(&body)
             .send()
             .await
@@ -463,8 +510,8 @@ mod tests {
     #[test]
     fn default_urls() {
         let c = ParallelClient::new("MY_KEY_VAR");
-        assert_eq!(c.search_url, "https://api.parallel.ai/v1/search");
-        assert_eq!(c.task_url, "https://api.parallel.ai/v1/tasks/runs");
+        assert_eq!(c.search_url, "https://api.parallel.ai/v1beta/search");
+        assert_eq!(c.task_url, "https://api.parallel.ai/v1beta/tasks/runs");
         assert_eq!(c.extract_url, "https://api.parallel.ai/v1beta/extract");
         assert_eq!(c.max_poll_attempts, 30);
         assert_eq!(c.poll_interval, Duration::from_secs(5));
