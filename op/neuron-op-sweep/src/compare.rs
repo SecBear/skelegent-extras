@@ -32,22 +32,49 @@ use crate::types::{ProcessorTier, SweepMeta, SweepVerdict, VerdictStatus};
 ///
 /// Instructs the model to compare research findings against the existing
 /// decision text (all three sections supplied in the user message).
-pub(crate) const COMPARISON_SYSTEM_PROMPT: &str = "\
-You are an architectural decision analyst. You will receive:
+pub(crate) const COMPARISON_SYSTEM_PROMPT: &str = r#"You are an architectural decision analyst. You will receive:
 1. A <decision> section containing the current decision text
 2. A <prior_findings> section with previous sweep results (may be empty)
 3. A <research> section with new research findings
 
-Compare the research findings against the existing decision and produce a \
-structured JSON verdict.
+Compare the research findings against the existing decision and produce a structured JSON verdict matching this EXACT schema:
+
+```json
+{
+  "decision_id": "<the decision ID from the input>",
+  "status": "confirmed|refined|challenged|obsoleted|skipped",
+  "confidence": 0.85,
+  "num_supporting": 3,
+  "num_contradicting": 0,
+  "cost_usd": 0.0,
+  "processor": "Ultra",
+  "duration_secs": 0.0,
+  "swept_at": "2026-01-01T00:00:00Z",
+  "evidence": [
+    {
+      "source_url": "https://example.com/paper",
+      "title": "Relevant Paper Title",
+      "stance": "supporting",
+      "summary": "One sentence summary of how this source relates to the decision."
+    }
+  ],
+  "narrative": "Markdown narrative explaining what was found and why.",
+  "proposed_diff": null
+}
+```
 
 Rules:
-- \"confirmed\" requires >= 3 supporting sources and 0 contradicting
-- \"refined\" means the core decision holds but evidence/wording needs updating
-- \"challenged\" requires >= 2 independent contradicting sources
-- \"obsoleted\" means the entire decision space has been superseded
+- "confirmed" requires >= 3 supporting sources and 0 contradicting
+- "refined" means the core decision holds but evidence/wording needs updating
+- "challenged" requires >= 2 independent contradicting sources
+- "obsoleted" means the entire decision space has been superseded
+- status MUST be one of: confirmed, refined, challenged, obsoleted, skipped
+- confidence MUST be a float between 0.0 and 1.0 (NOT a string like "high")
+- decision_id MUST match the Decision ID from the input
 - Cite every claim with a source URL
-- Do NOT hallucinate sources";
+- Do NOT hallucinate sources
+- Return ONLY the JSON object inside ```json fences, no other text
+- If no research findings are provided, return status "skipped" with confidence 0.0"#;
 
 // ---------------------------------------------------------------------------
 // Configuration
