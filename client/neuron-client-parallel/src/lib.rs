@@ -97,15 +97,7 @@ struct SearchResponseResult {
     url: String,
     #[serde(default)]
     title: String,
-    #[serde(default)]
-    excerpts: Vec<SearchExcerpt>,
-}
-
-/// Text excerpt from a search result.
-#[derive(Deserialize)]
-struct SearchExcerpt {
-    #[serde(default)]
-    text: String,
+    excerpts: Vec<String>,
 }
 
 /// Parallel.ai task creation response.
@@ -281,10 +273,7 @@ impl ParallelClient {
 
         // Convert API-specific response to our public SearchResult type.
         let results = parsed.results.into_iter().map(|r| {
-            let snippet = r.excerpts.into_iter()
-                .map(|e| e.text)
-                .collect::<Vec<_>>()
-                .join("\n\n");
+            let snippet = r.excerpts.join("\n\n");
             SearchResult {
                 url: r.url,
                 title: r.title,
