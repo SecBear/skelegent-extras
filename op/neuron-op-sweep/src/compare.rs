@@ -1,71 +1,28 @@
-//! Sweep operator pipeline — comparison and verdict.
+//! Sweep operator — comparison step.
 //!
 //! [`CompareOperator`] implements the comparison step of the sweep pipeline.
 //! Research is orchestrator-owned: callers supply research results to
-//! [`crate::workflow::run_sweep`] directly rather than dispatching a research operator.
+//! the sweep cycle function directly rather than dispatching a research
+//! operator.
 //!
 //! [`CompareOperator`] implements the [`Operator`] trait, allowing it to be
 //! dispatched via an [`Orchestrator`] without violating the effects boundary.
-//! Use [`crate::workflow::run_sweep`] to sequence context assembly and comparison.
+//! Use the sweep cycle composition function to sequence context assembly
+//! and comparison.
+//!
+//! [`Orchestrator`]: layer0::Orchestrator
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use layer0::state::{MemoryTier, StateReader, StateStore};
-use layer0::{
-    Content, Effect, ExitReason, Operator, OperatorError, OperatorInput,
-    OperatorOutput, Scope,
-};
-
-use crate::types::{ProcessorTier, SweepMeta, SweepVerdict, VerdictStatus};
-use crate::provider::CompareInput;
+use layer0::state::MemoryTier;
+use layer0::{Content, Effect, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, Scope};
+use neuron_orch_kit::ScopedState;
 use neuron_turn::provider::{Provider, ProviderError};
 use neuron_turn::types::{ContentPart, ProviderMessage, ProviderRequest, Role};
 
-// ---------------------------------------------------------------------------
-// Scope constant
-// ---------------------------------------------------------------------------
-
-/// Canonical scope name for all sweep state (decision cards, sweep metadata,
-/// and delta entries).
-pub const SWEEP_SCOPE: &str = "sweep";
-
-
-// ---------------------------------------------------------------------------
-// StoreAsReader adapter
-// ---------------------------------------------------------------------------
-
-/// Thin adapter that allows a `&dyn StateStore` to be used where a
-/// `&dyn StateReader` is required (e.g. `ContextAssembler::assemble`).
-///
-/// The blanket impl `impl<T: StateStore> StateReader for T` does not apply
-/// to unsized `dyn StateStore`, so this wrapper forwards explicitly.
-pub(crate) struct StoreAsReader<'a>(pub(crate) &'a dyn StateStore);
-
-#[async_trait::async_trait]
-impl StateReader for StoreAsReader<'_> {
-    async fn read(
-        &self,
-        scope: &Scope,
-        key: &str,
-    ) -> Result<Option<serde_json::Value>, layer0::error::StateError> {
-        self.0.read(scope, key).await
-    }
-    async fn list(
-        &self,
-        scope: &Scope,
-        prefix: &str,
-    ) -> Result<Vec<String>, layer0::error::StateError> {
-        self.0.list(scope, prefix).await
-    }
-    async fn search(
-        &self,
-        scope: &Scope,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<layer0::state::SearchResult>, layer0::error::StateError> {
-        self.0.search(scope, query, limit).await
-    }
-}
+use crate::provider::CompareInput;
+use crate::types::{ProcessorTier, SweepMeta, SweepVerdict, VerdictStatus};
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -98,7 +55,7 @@ Rules:
 
 /// Configuration for [`CompareOperator`].
 #[derive(Debug, Clone)]
-pub struct SweepOperatorConfig {
+pub struct CompareConfig {
     /// Minimum time between sweeps of the same decision.
     ///
     /// A sweep that arrives sooner than this interval returns
@@ -131,7 +88,7 @@ pub struct SweepOperatorConfig {
     pub max_response_tokens: usize,
 }
 
-impl Default for SweepOperatorConfig {
+impl Default for CompareConfig {
     fn default() -> Self {
         Self {
             min_sweep_interval: Duration::from_secs(20 * 3600),
@@ -143,9 +100,12 @@ impl Default for SweepOperatorConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Processor selection
+// ---------------------------------------------------------------------------
 
 /// Select the research processor tier based on budget and previous verdict.
-pub(crate) fn select_processor(
+pub fn select_processor(
     budget_remaining_usd: f64,
     budget_total_usd: f64,
     previous_verdict: Option<&VerdictStatus>,
@@ -177,7 +137,7 @@ pub(crate) fn select_processor(
 // Verdict JSON extraction helper
 // ---------------------------------------------------------------------------
 
-/// Strip an optional `` ```json `` / `` ``` `` fence and return the inner JSON slice.
+/// Strip an optional ` ```json ` / ` ``` ` fence and return the inner JSON slice.
 ///
 /// Many LLMs wrap JSON responses in a fenced code block. If no fence is found,
 /// the input is returned unchanged.
@@ -192,47 +152,55 @@ fn extract_json_block(raw: &str) -> &str {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // CompareOperator
 // ---------------------------------------------------------------------------
 
 /// Operator that compares research findings against a decision via an LLM [`Provider`].
 ///
-/// Context assembly is **turn-owned**: the operator reads the
-/// decision card and prior sweep deltas from the state store during `execute()`,
-/// then combines them with the research results supplied in the input message.
+/// Context assembly is **turn-owned**: the operator reads the decision card and
+/// prior sweep deltas from the scoped state during `execute()`, then combines
+/// them with the research results supplied in the input message.
 ///
-/// Dispatched by [`crate::workflow::run_sweep`] for the comparison step.
-/// Declares [`Effect::WriteMemory`] for sweep metadata and a delta entry
-/// rather than writing to state directly.
+/// Dispatched by the sweep cycle composition function for the comparison step.
+///
+/// # State access
+///
+/// - `card:{id}` — read-only. Decision card text.
+/// - `delta:{id}:*` — read-only. Prior sweep findings listed by prefix.
+/// - `meta:{id}:last_sweep` — written directly (own-scope).
+///
+/// # Cross-scope effect
+///
+/// Declares one [`Effect::WriteMemory`] for the delta entry into
+/// `Scope::Custom("sweep-results")`.
 ///
 /// # Input
 ///
-/// - `input.message` — JSON-serialized `Vec<ResearchResult>` supplied by the caller.
-/// - `input.metadata["decision_id"]` — string identifier for the decision under review.
+/// - `input.message` — JSON-serialized [`CompareInput`] supplied by the caller.
 ///
 /// # Output
 ///
 /// - `output.message` — JSON-serialized [`SweepVerdict`].
-/// - `output.effects` — [`Effect::WriteMemory`] for the sweep metadata key
-///   (`meta:{id}:last_sweep`) and a delta key (`delta:{id}:{timestamp}`).
+/// - `output.effects` — [`Effect::WriteMemory`] for the cross-scope delta entry.
 pub struct CompareOperator<P: Provider> {
     /// LLM provider used for verdict comparison.
     llm: P,
-    /// State store for reading decision cards and prior findings (read-only).
-    store: std::sync::Arc<dyn StateStore>,
+    /// Scoped state for reading decision cards and prior findings, and writing
+    /// own-scope sweep metadata.
+    state: Arc<dyn ScopedState>,
     /// Operator configuration.
-    pub config: SweepOperatorConfig,
+    pub config: CompareConfig,
 }
 
 impl<P: Provider> CompareOperator<P> {
     /// Create a new compare operator.
     ///
-    /// The `store` is used **read-only** to assemble context (decision card,
-    /// prior sweep deltas) during `execute()`. Writes are declared as effects.
-    pub fn new(llm: P, store: std::sync::Arc<dyn StateStore>, config: SweepOperatorConfig) -> Self {
-        Self { llm, store, config }
+    /// The `state` is scoped to this operator's partition. Own-scope metadata
+    /// writes (`meta:{id}:last_sweep`) are performed directly. Cross-scope
+    /// delta writes are declared as [`Effect::WriteMemory`].
+    pub fn new(llm: P, state: Arc<dyn ScopedState>, config: CompareConfig) -> Self {
+        Self { llm, state, config }
     }
 }
 
@@ -246,7 +214,8 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
             .as_text()
             .ok_or_else(|| {
                 OperatorError::NonRetryable(
-                    "CompareOperator: input.message must be text containing CompareInput JSON".into(),
+                    "CompareOperator: input.message must be text containing CompareInput JSON"
+                        .into(),
                 )
             })?;
         let compare_in: CompareInput = serde_json::from_str(msg_text).map_err(|e| {
@@ -259,40 +228,37 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
         let decision_id = compare_in.decision_id;
 
         // --- Turn-owned context assembly ---
-        // Read the decision card and prior sweep deltas from state.
-        let scope = Scope::Custom(SWEEP_SCOPE.to_string());
-        let reader = StoreAsReader(self.store.as_ref());
-        let assembler = neuron_context::ContextAssembler::new(
-            neuron_context::ContextAssemblyConfig::default(),
-        );
-        let context_messages = assembler
-            .assemble(&reader, &scope, &decision_id, None)
+        // Read the decision card from own-scope state.
+        let decision_text_owned: String = match self
+            .state
+            .read(&format!("card:{}", decision_id))
+            .await
+            .unwrap_or(None)
+        {
+            Some(val) => match val {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            },
+            None => "[Decision text not available]".to_string(),
+        };
+        let decision_text = decision_text_owned.as_str();
+
+        // Read prior sweep deltas by prefix, collect their text content.
+        let delta_keys = self
+            .state
+            .list(&format!("delta:{}:", decision_id))
             .await
             .unwrap_or_default();
-
-        // Decision card (pinned, salience=1.0).
-        let decision_text = context_messages
-            .iter()
-            .filter(|m| m.source.as_deref() != Some("sweep:delta") && m.source.as_deref() != Some("sweep:fts"))
-            .filter(|m| m.salience == Some(1.0))
-            .filter_map(|m| m.message.content.first())
-            .filter_map(|c| match c {
-                ContentPart::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .next()
-            .unwrap_or("[Decision text not available]");
-
-        // Prior sweep deltas.
-        let prior_findings: Vec<&str> = context_messages
-            .iter()
-            .filter(|m| m.source.as_deref() == Some("sweep:delta"))
-            .filter_map(|m| m.message.content.first())
-            .filter_map(|c| match c {
-                ContentPart::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
+        let mut prior_findings: Vec<String> = Vec::with_capacity(delta_keys.len());
+        for key in &delta_keys {
+            if let Ok(Some(val)) = self.state.read(key).await {
+                let text = match val {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                };
+                prior_findings.push(text);
+            }
+        }
         let prior_findings_json =
             serde_json::to_string(&prior_findings).unwrap_or_else(|_| "[]".to_string());
 
@@ -318,9 +284,7 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
             ProviderError::RateLimited => {
                 OperatorError::Retryable("rate limited by LLM provider".into())
             }
-            ProviderError::TransientError { message, .. } => {
-                OperatorError::Retryable(message)
-            }
+            ProviderError::TransientError { message, .. } => OperatorError::Retryable(message),
             ProviderError::AuthFailed(msg) => {
                 OperatorError::NonRetryable(format!("auth: {msg}"))
             }
@@ -350,30 +314,19 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
             })?
         };
 
-        // Declare WriteMemory effects for sweep metadata and delta.
-        let scope = Scope::Custom(SWEEP_SCOPE.to_string());
+        // Write own-scope sweep metadata directly (not an effect — same scope).
         let meta_key = format!("meta:{}:last_sweep", decision_id);
         let meta = SweepMeta {
             swept_at: chrono::Utc::now().to_rfc3339(),
             verdict: verdict.status.clone(),
             cost_usd: verdict.cost_usd,
         };
-
-        let mut effects: Vec<Effect> = Vec::with_capacity(2);
-
         if let Ok(meta_value) = serde_json::to_value(&meta) {
-            effects.push(Effect::WriteMemory {
-                scope: scope.clone(),
-                key: meta_key,
-                value: meta_value,
-                tier: Some(MemoryTier::Hot),
-                lifetime: None,
-                content_kind: None,
-                salience: Some(1.0),
-                ttl: None,
-            });
+            // Best-effort: ignore write errors on own-scope metadata.
+            let _ = self.state.write(&meta_key, meta_value).await;
         }
 
+        // Declare a cross-scope WriteMemory effect for the delta entry.
         let delta_key = format!(
             "delta:{}:{}",
             decision_id,
@@ -386,8 +339,8 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
             "num_contradicting": verdict.num_contradicting,
             "narrative": &verdict.narrative,
         });
-        effects.push(Effect::WriteMemory {
-            scope,
+        let effects = vec![Effect::WriteMemory {
+            scope: Scope::Custom("sweep-results".to_string()),
             key: delta_key,
             value: delta_value,
             tier: Some(MemoryTier::Hot),
@@ -395,7 +348,7 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
             content_kind: None,
             salience: Some(0.8),
             ttl: None,
-        });
+        }];
 
         // Serialize the verdict as the output message.
         let verdict_json =
@@ -414,21 +367,83 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
 mod tests {
     use super::*;
     use crate::types::{EvidenceItem, EvidenceStance, ProcessorTier};
-    use neuron_turn::types::{ProviderResponse, StopReason, TokenUsage};
     use layer0::operator::TriggerType;
-    use layer0::error::StateError;
-    use layer0::state::{SearchResult as StateSearchResult, StateStore};
-    use std::sync::Arc;
+    use layer0::StateError;
+    use neuron_turn::provider::{Provider, ProviderError};
+    use neuron_turn::types::{ProviderResponse, StopReason, TokenUsage};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
-    struct EmptyStore;
+    // -----------------------------------------------------------------------
+    // Mock ScopedState
+    // -----------------------------------------------------------------------
+
+    /// Mock scoped state backed by an in-memory map. Records write calls.
+    struct MockScopedState {
+        data: Mutex<HashMap<String, serde_json::Value>>,
+        write_calls: Mutex<Vec<String>>,
+    }
+
+    impl MockScopedState {
+        fn new() -> Self {
+            Self {
+                data: Mutex::new(HashMap::new()),
+                write_calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        #[allow(dead_code)]
+        fn with_entry(key: &str, value: serde_json::Value) -> Self {
+            let s = Self::new();
+            s.data.lock().unwrap().insert(key.to_string(), value);
+            s
+        }
+
+        fn recorded_writes(&self) -> Vec<String> {
+            self.write_calls.lock().unwrap().clone()
+        }
+    }
 
     #[async_trait::async_trait]
-    impl StateStore for EmptyStore {
-        async fn read(&self, _s: &Scope, _k: &str) -> Result<Option<serde_json::Value>, StateError> { Ok(None) }
-        async fn write(&self, _s: &Scope, _k: &str, _v: serde_json::Value) -> Result<(), StateError> { Ok(()) }
-        async fn delete(&self, _s: &Scope, _k: &str) -> Result<(), StateError> { Ok(()) }
-        async fn list(&self, _s: &Scope, _p: &str) -> Result<Vec<String>, StateError> { Ok(vec![]) }
-        async fn search(&self, _s: &Scope, _q: &str, _l: usize) -> Result<Vec<StateSearchResult>, StateError> { Ok(vec![]) }
+    impl ScopedState for MockScopedState {
+        async fn read(&self, key: &str) -> Result<Option<serde_json::Value>, StateError> {
+            Ok(self.data.lock().unwrap().get(key).cloned())
+        }
+
+        async fn write(
+            &self,
+            key: &str,
+            value: serde_json::Value,
+        ) -> Result<(), StateError> {
+            self.write_calls.lock().unwrap().push(key.to_string());
+            self.data.lock().unwrap().insert(key.to_string(), value);
+            Ok(())
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), StateError> {
+            self.data.lock().unwrap().remove(key);
+            Ok(())
+        }
+
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, StateError> {
+            let keys: Vec<String> = self
+                .data
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|k| k.starts_with(prefix))
+                .cloned()
+                .collect();
+            Ok(keys)
+        }
+
+        async fn search(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<layer0::SearchResult>, StateError> {
+            Ok(vec![])
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -466,7 +481,6 @@ mod tests {
         }
     }
 
-
     /// Shared mock LLM provider that returns a fixed verdict as JSON.
     struct MockLlmProvider {
         verdict: SweepVerdict,
@@ -476,8 +490,8 @@ mod tests {
         fn complete(
             &self,
             _request: ProviderRequest,
-        ) -> impl std::future::Future<Output = Result<ProviderResponse, ProviderError>>
-               + Send {
+        ) -> impl std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send
+        {
             let json = serde_json::to_string(&self.verdict).expect("verdict serializable");
             async move {
                 Ok(ProviderResponse {
@@ -493,7 +507,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // select_processor — all 5 cases from the spec
+    // select_processor — all 8 cases
     // -----------------------------------------------------------------------
 
     #[test]
@@ -511,8 +525,7 @@ mod tests {
     #[test]
     fn select_processor_refined_returns_core_regardless_of_budget() {
         for remaining in [0.1, 5.0, 9.9] {
-            let tier =
-                select_processor(remaining, 10.0, Some(&VerdictStatus::Refined));
+            let tier = select_processor(remaining, 10.0, Some(&VerdictStatus::Refined));
             assert_eq!(
                 tier,
                 ProcessorTier::Core,
@@ -577,12 +590,12 @@ mod tests {
     // CompareOperator — Operator trait impl
     // -----------------------------------------------------------------------
 
-
     #[tokio::test]
     async fn compare_operator_returns_verdict_json() {
         let expected = dummy_verdict("topic-3b");
         let mock = MockLlmProvider { verdict: expected.clone() };
-        let op = CompareOperator::new(mock, Arc::new(EmptyStore), SweepOperatorConfig::default());
+        let state = Arc::new(MockScopedState::new());
+        let op = CompareOperator::new(mock, state, CompareConfig::default());
 
         let compare_in = crate::provider::CompareInput {
             research_results: vec![dummy_result()],
@@ -599,9 +612,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compare_operator_declares_write_memory_effects() {
+    async fn compare_operator_writes_meta_to_own_scope() {
         let mock = MockLlmProvider { verdict: dummy_verdict("topic-3b") };
-        let op = CompareOperator::new(mock, Arc::new(EmptyStore), SweepOperatorConfig::default());
+        let state = Arc::new(MockScopedState::new());
+        let state_ref = state.clone();
+        let op = CompareOperator::new(mock, state, CompareConfig::default());
+
+        let compare_in = crate::provider::CompareInput {
+            research_results: vec![dummy_result()],
+            decision_id: "topic-3b".to_string(),
+        };
+        let msg = serde_json::to_string(&compare_in).unwrap();
+        let input = OperatorInput::new(Content::text(msg), TriggerType::Task);
+
+        op.execute(input).await.expect("execute should succeed");
+
+        // Verify the meta key was written to own-scope state.
+        let writes = state_ref.recorded_writes();
+        assert!(
+            writes.iter().any(|k| k.contains("meta:topic-3b:last_sweep")),
+            "expected meta:topic-3b:last_sweep in write calls, got: {:?}",
+            writes
+        );
+    }
+
+    #[tokio::test]
+    async fn compare_operator_declares_delta_effect() {
+        let mock = MockLlmProvider { verdict: dummy_verdict("topic-3b") };
+        let state = Arc::new(MockScopedState::new());
+        let op = CompareOperator::new(mock, state, CompareConfig::default());
 
         let compare_in = crate::provider::CompareInput {
             research_results: vec![dummy_result()],
@@ -612,32 +651,30 @@ mod tests {
 
         let output = op.execute(input).await.expect("execute should succeed");
 
-        // Expect exactly 2 effects: meta and delta.
+        // Expect exactly 1 cross-scope effect: the delta WriteMemory.
         assert_eq!(
             output.effects.len(),
-            2,
-            "expected 2 WriteMemory effects (meta + delta)"
+            1,
+            "expected exactly 1 WriteMemory effect (delta), got {}",
+            output.effects.len()
         );
-        for effect in &output.effects {
-            assert!(
-                matches!(effect, Effect::WriteMemory { .. }),
-                "all effects must be WriteMemory, got {:?}",
-                effect
-            );
-        }
 
-        // Verify meta key pattern.
-        if let Effect::WriteMemory { key, .. } = &output.effects[0] {
-            assert!(
-                key.contains("last_sweep"),
-                "first effect should be the meta key, got: {key}"
+        let effect = &output.effects[0];
+        assert!(
+            matches!(effect, Effect::WriteMemory { .. }),
+            "effect must be WriteMemory, got {:?}",
+            effect
+        );
+
+        if let Effect::WriteMemory { scope, key, .. } = effect {
+            assert_eq!(
+                scope,
+                &Scope::Custom("sweep-results".to_string()),
+                "delta effect must target sweep-results scope"
             );
-        }
-        // Verify delta key pattern.
-        if let Effect::WriteMemory { key, .. } = &output.effects[1] {
             assert!(
                 key.starts_with("delta:topic-3b:"),
-                "second effect should be a delta key, got: {key}"
+                "delta key must start with delta:topic-3b:, got: {key}"
             );
         }
     }

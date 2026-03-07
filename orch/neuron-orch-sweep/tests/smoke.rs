@@ -11,14 +11,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use layer0::effect::Scope;
 use layer0::error::StateError;
+use layer0::operator::TriggerType;
 use layer0::state::{SearchResult, StateStore, StoreOptions};
 use neuron_effects_git::{PrAction, route_verdict};
 use layer0::id::AgentId;
 use layer0::test_utils::LocalOrchestrator;
 use neuron_op_sweep::{
-    CompareOperator, EvidenceItem, EvidenceStance, ProcessorTier, ResearchResult,
-    SweepOperatorConfig, SweepVerdict, VerdictStatus, run_sweep,
+    CompareOperator, CompareConfig, EvidenceItem, EvidenceStance, ProcessorTier, ResearchResult,
+    SweepVerdict, VerdictStatus, CompareInput,
 };
+use neuron_orch_kit::{dispatch_typed, ScopedStateView};
 use neuron_orch_sweep::{
     BudgetConfig, BudgetState, CycleReport, OrchestratorConfig, QueuedDecision, run_cycle,
 };
@@ -160,9 +162,9 @@ fn default_orch_config() -> OrchestratorConfig {
         sweep_config_path: "/tmp/sweep.md".into(),
         state_db_path: "/tmp/state.db".into(),
         budget: BudgetConfig::default(),
-        operator: SweepOperatorConfig {
+        operator: CompareConfig {
             min_sweep_interval: Duration::from_secs(0), // disable dedup for test
-            ..SweepOperatorConfig::default()
+            ..CompareConfig::default()
         },
     }
 }
@@ -202,7 +204,7 @@ async fn smoke_full_cycle_with_three_decisions() {
         },
     ];
 
-    // Build the operator closure using run_sweep + Orchestrator (idiomatic pipeline).
+    // Build the operator closure using dispatch_typed + Orchestrator (idiomatic pipeline).
     let store_clone = Arc::clone(&store);
     let operator =
         move |id: String,
@@ -212,15 +214,20 @@ async fn smoke_full_cycle_with_three_decisions() {
             Box::pin(async move {
                 let mut orch = LocalOrchestrator::new();
                 let compare_id = AgentId::new("compare");
-                let cfg = SweepOperatorConfig {
+                let cfg = CompareConfig {
                     min_sweep_interval: Duration::from_secs(0),
-                    ..SweepOperatorConfig::default()
+                    ..CompareConfig::default()
                 };
-                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, Arc::clone(&s) as Arc<dyn StateStore>, cfg)));
-                let results = vec![test_research_result()];
-                run_sweep(&orch, &compare_id, &id, &results, prev, 8.0, 10.0, s.as_ref())
-                    .await
-                    .unwrap_or_else(|e| panic!("operator failed for {id}: {e}"))
+                let scoped = Arc::new(ScopedStateView::new(Arc::clone(&s) as Arc<dyn StateStore>, Scope::Custom("sweep".into())));
+                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, scoped, cfg)));
+                let input = CompareInput {
+                    research_results: vec![test_research_result()],
+                    decision_id: id.clone(),
+                };
+                let (verdict, _) = dispatch_typed::<CompareInput, SweepVerdict>(
+                    &orch, &compare_id, input, TriggerType::Task,
+                ).await.unwrap_or_else(|e| panic!("operator failed for {id}: {e}"));
+                verdict
             })
         };
 
@@ -266,7 +273,7 @@ async fn smoke_full_cycle_with_three_decisions() {
         }
     }
 
-    // Note: The idiomatic pipeline (run_sweep + LocalOrchestrator) returns
+    // Note: The idiomatic pipeline (dispatch_typed + LocalOrchestrator) returns
     // WriteMemory effects in OperatorOutput but does NOT execute them —
     // effect interpretation is an orchestrator concern. The RecordingStore
     // receives no writes. Effect execution is tested separately via
@@ -309,12 +316,17 @@ async fn smoke_budget_exhaustion_stops_cycle() {
             Box::pin(async move {
                 let mut orch = LocalOrchestrator::new();
                 let compare_id = AgentId::new("compare");
-                let cfg = SweepOperatorConfig::default();
-                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, Arc::clone(&s) as Arc<dyn StateStore>, cfg)));
-                let results = vec![test_research_result()];
-                run_sweep(&orch, &compare_id, &id, &results, prev, 0.004, 0.10, s.as_ref())
-                    .await
-                    .unwrap_or_else(|e| panic!("operator failed: {e}"))
+                let cfg = CompareConfig::default();
+                let scoped = Arc::new(ScopedStateView::new(Arc::clone(&s) as Arc<dyn StateStore>, Scope::Custom("sweep".into())));
+                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, scoped, cfg)));
+                let input = CompareInput {
+                    research_results: vec![test_research_result()],
+                    decision_id: id.clone(),
+                };
+                let (verdict, _) = dispatch_typed::<CompareInput, SweepVerdict>(
+                    &orch, &compare_id, input, TriggerType::Task,
+                ).await.unwrap_or_else(|e| panic!("operator failed: {e}"));
+                verdict
             })
         };
 

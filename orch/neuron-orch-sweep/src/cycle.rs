@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
 
-use neuron_op_sweep::{SweepOperatorConfig, SweepVerdict, VerdictStatus};
+use neuron_op_sweep::{CompareConfig, SweepVerdict, VerdictStatus};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
@@ -23,7 +23,7 @@ use crate::priority::QueuedDecision;
 
 /// Top-level orchestrator configuration.
 ///
-/// This struct is not serializable because [`SweepOperatorConfig`] and
+/// This struct is not serializable because [`CompareConfig`] and
 /// [`Duration`] do not implement [`serde::Serialize`]. Persist it as source
 /// code or a custom config file.
 #[derive(Debug, Clone)]
@@ -37,7 +37,7 @@ pub struct OrchestratorConfig {
     /// Budget enforcement configuration.
     pub budget: BudgetConfig,
     /// Sweep operator configuration forwarded to each operator invocation.
-    pub operator: SweepOperatorConfig,
+    pub operator: CompareConfig,
 }
 
 /// Summary produced at the end of each sweep cycle.
@@ -236,7 +236,7 @@ mod tests {
             sweep_config_path: PathBuf::from("/tmp/sweep.md"),
             state_db_path: PathBuf::from("/tmp/state.db"),
             budget: BudgetConfig::default(),
-            operator: SweepOperatorConfig::default(),
+            operator: CompareConfig::default(),
         }
     }
 
