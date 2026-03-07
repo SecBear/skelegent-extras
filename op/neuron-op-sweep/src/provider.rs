@@ -1,11 +1,12 @@
 //! Research provider types and error definitions.
 //!
 //! [`ResearchResult`] and [`SweepError`] are the core types used by the sweep
-//! pipeline. Research is orchestrator-owned; these types are passed directly to
-//! [`crate::workflow::run_sweep`].
-
+//! pipeline. [`ResearchSource`] is the trait that research operators use to
+//! obtain evidence — implementations live in consumer crates (e.g. the golden
+//! sweep runner wraps `ParallelClient`).
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use async_trait::async_trait;
 
 /// A single research result returned by the provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +19,62 @@ pub struct ResearchResult {
     pub snippet: String,
     /// RFC 3339 timestamp of when this result was retrieved.
     pub retrieved_at: String,
+}
+
+/// How the research operator should gather evidence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchMode {
+    /// Quick synchronous search (~5s). Broad but shallow.
+    Search,
+    /// Deep async research via task API (5-25 min). Thorough analysis.
+    #[default]
+    Deep,
+}
+
+
+/// Input for [`crate::research_operator::ResearchOperator`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchInput {
+    /// The decision being researched.
+    pub decision_id: String,
+    /// Search query text.
+    pub query: String,
+    /// Which angle/facet this query covers.
+    pub query_angle: String,
+    /// How deep to research.
+    #[serde(default)]
+    pub mode: ResearchMode,
+    /// Processor tier for deep mode (e.g. "ultra", "core").
+    #[serde(default = "default_processor")]
+    pub processor: String,
+}
+
+fn default_processor() -> String {
+    "ultra".to_string()
+}
+
+/// Abstraction over a research backend.
+///
+/// Implementations live outside this crate — the sweep pipeline only depends
+/// on this trait, not on any concrete HTTP client.
+///
+/// # Contract
+///
+/// - `search` must return quickly (seconds). Used for broad coverage.
+/// - `deep_research` may take minutes. Used for thorough per-decision analysis.
+/// - Both must populate `retrieved_at` on every [`ResearchResult`].
+#[async_trait]
+pub trait ResearchSource: Send + Sync + 'static {
+    /// Quick synchronous search.
+    async fn search(&self, query: &str) -> Result<Vec<ResearchResult>, SweepError>;
+
+    /// Deep async research with specified processor tier.
+    async fn deep_research(
+        &self,
+        query: &str,
+        processor: &str,
+    ) -> Result<Vec<ResearchResult>, SweepError>;
 }
 
 /// Errors that can occur during a sweep operation.

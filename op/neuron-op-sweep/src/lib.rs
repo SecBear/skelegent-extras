@@ -23,7 +23,7 @@
 //!   as an [`Operator`](layer0::Operator), enabling outer systems to dispatch entire
 //!   sweep cycles over any transport.
 //!
-//! Research is caller-supplied — the crate does not perform research itself.
+//! [`ResearchSource`] is the trait that backs research — implementations live
 //!
 //! # Example
 //!
@@ -33,9 +33,9 @@
 //!
 //! // 1. Create operators with ScopedState + Provider.
 //! // 2. Register them on an Orchestrator.
-//! // 3. Collect research results externally.
-//! // 4. Call run_sweep_cycle(&orch, &state, &budget, &trace, ...).await
-//! ```
+//! // 3. Register ResearchOperator + CompareOperator on an Orchestrator.
+//! // 4. Dispatch ResearchOperator, feed results into CompareOperator.
+//! // 5. Or call run_sweep_cycle(&orch, &state, &budget, &trace, ...).await
 
 pub mod compare;
 pub mod cost;
@@ -45,6 +45,7 @@ pub mod synthesis;
 pub mod synthesis_operator;
 pub mod types;
 pub mod queries;
+pub mod research_operator;
 
 pub use compare::*;
 pub use cost::*;
@@ -54,3 +55,4 @@ pub use synthesis::*;
 pub use synthesis_operator::{SynthesisInput, SynthesisOperator};
 pub use types::*;
 pub use queries::{DecisionQuery, next_query, queries_for};
+pub use research_operator::ResearchOperator;
