@@ -22,16 +22,20 @@
 //! [`SynthesisConfig`]: crate::synthesis::SynthesisConfig
 
 use std::sync::Arc;
-use rust_decimal::prelude::ToPrimitive;
+use std::time::Instant;
 
 use async_trait::async_trait;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
+use layer0::duration::DurationMs;
+use layer0::operator::OperatorMetadata;
 use layer0::{Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput};
 use neuron_orch_kit::ScopedState;
 use neuron_turn::provider::{Provider, ProviderError};
 use neuron_turn::types::{ContentPart, ProviderMessage, ProviderRequest, Role};
-
+use tracing::{debug, info};
 use crate::synthesis::{
     CandidateDecision, StructuralChange, SynthesisConfig, SynthesisReport, PASS_1_SYSTEM_PROMPT,
     PASS_2_SYSTEM_PROMPT,
@@ -192,6 +196,11 @@ impl<P: Provider> SynthesisOperator<P> {
 #[async_trait]
 impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
     async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
+        let start = Instant::now();
+        let mut total_tokens_in: u64 = 0;
+        let mut total_tokens_out: u64 = 0;
+        let mut total_cost = Decimal::ZERO;
+
         // --- Parse typed input ---
         let msg_text = input.message.as_text().ok_or_else(|| {
             OperatorError::NonRetryable(
@@ -228,6 +237,18 @@ impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
         let pass1_response = self.llm.complete(pass1_request).await.map_err(map_provider_err)?;
 
         let mut total_cost_usd: f64 = pass1_response.cost.and_then(|d| d.to_f64()).unwrap_or(0.0);
+        total_tokens_in += pass1_response.usage.input_tokens;
+        total_tokens_out += pass1_response.usage.output_tokens;
+        total_cost += pass1_response.cost.unwrap_or(Decimal::ZERO);
+
+        info!(
+            pass = 1,
+            tokens_in = pass1_response.usage.input_tokens,
+            tokens_out = pass1_response.usage.output_tokens,
+            cost = %pass1_response.cost.unwrap_or(Decimal::ZERO),
+            duration_ms = start.elapsed().as_millis() as u64,
+            "synthesis: pass 1 complete"
+        );
 
         let pass1_raw = pass1_response
             .content
@@ -312,6 +333,17 @@ impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
             let pass2_response =
                 self.llm.complete(pass2_request).await.map_err(map_provider_err)?;
             total_cost_usd += pass2_response.cost.and_then(|d| d.to_f64()).unwrap_or(0.0);
+            total_tokens_in += pass2_response.usage.input_tokens;
+            total_tokens_out += pass2_response.usage.output_tokens;
+            total_cost += pass2_response.cost.unwrap_or(Decimal::ZERO);
+
+            debug!(
+                pass = 2,
+                flag_summary = %flag.summary,
+                tokens_in = pass2_response.usage.input_tokens,
+                tokens_out = pass2_response.usage.output_tokens,
+                "synthesis: pass 2 deep dive"
+            );
 
             let pass2_raw = pass2_response
                 .content
@@ -360,7 +392,27 @@ impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
         }
 
         let report_json = serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string());
-        Ok(OperatorOutput::new(Content::text(report_json), ExitReason::Complete))
+        let duration = DurationMs::from(start.elapsed());
+        let mut metadata = OperatorMetadata::default();
+        metadata.tokens_in = total_tokens_in;
+        metadata.tokens_out = total_tokens_out;
+        metadata.cost = total_cost;
+        metadata.turns_used = 1 + flags.len().min(self.config.max_deep_dives) as u32;
+        metadata.duration = duration;
+
+        info!(
+            structural = n_structural,
+            candidates = n_candidates,
+            total_tokens_in,
+            total_tokens_out,
+            total_cost = %total_cost,
+            duration_ms = duration.as_millis(),
+            "synthesis: complete"
+        );
+
+        let mut output = OperatorOutput::new(Content::text(report_json), ExitReason::Complete);
+        output.metadata = metadata;
+        Ok(output)
     }
 }
 
