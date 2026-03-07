@@ -67,6 +67,12 @@ pub struct CompareInput {
     pub research_results: Vec<ResearchResult>,
     /// Identifier of the decision under review.
     pub decision_id: String,
+    /// The search query that produced these research results.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Which angle/facet this query covers.
+    #[serde(default)]
+    pub query_angle: Option<String>,
 }
 
 #[cfg(test)]

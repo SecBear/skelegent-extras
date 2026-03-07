@@ -137,6 +137,9 @@ impl Provider for TestLlm {
             }],
             narrative: "Test narrative".into(),
             proposed_diff: None,
+            research_inputs: vec![],
+            query: String::new(),
+            query_angle: String::new(),
         };
         let json = serde_json::to_string(&verdict).expect("serialize verdict");
         async move {
@@ -223,6 +226,8 @@ async fn smoke_full_cycle_with_three_decisions() {
                 let input = CompareInput {
                     research_results: vec![test_research_result()],
                     decision_id: id.clone(),
+                    query: None,
+                    query_angle: None,
                 };
                 let (verdict, _) = dispatch_typed::<CompareInput, SweepVerdict>(
                     &orch, &compare_id, input, TriggerType::Task,
@@ -322,6 +327,8 @@ async fn smoke_budget_exhaustion_stops_cycle() {
                 let input = CompareInput {
                     research_results: vec![test_research_result()],
                     decision_id: id.clone(),
+                    query: None,
+                    query_angle: None,
                 };
                 let (verdict, _) = dispatch_typed::<CompareInput, SweepVerdict>(
                     &orch, &compare_id, input, TriggerType::Task,

@@ -108,6 +108,9 @@ pub struct StructuralChange {
     pub observation_count: usize,
     /// Confidence in this classification (0.0–1.0).
     pub confidence: f64,
+    /// Source URLs from research results that support this structural observation.
+    #[serde(default)]
+    pub source_urls: Vec<String>,
 }
 
 /// Lifecycle stage of a candidate decision in the promotion pipeline.
@@ -194,6 +197,9 @@ pub struct RelationshipUpdate {
     pub action: RelationshipAction,
     /// Evidence supporting this relationship update (markdown).
     pub evidence: String,
+    /// Source URLs supporting this relationship change.
+    #[serde(default)]
+    pub source_urls: Vec<String>,
 }
 
 /// Full output of one synthesis agent run covering a complete sweep cycle.
@@ -383,6 +389,7 @@ mod tests {
                 evidence: "Both reference tokio runtime primitives.".to_string(),
                 observation_count: 2,
                 confidence: 0.85,
+                source_urls: vec![],
             }],
             candidates: vec![make_candidate(CandidateStage::Observed, 1)],
             relationship_updates: vec![RelationshipUpdate {
@@ -391,6 +398,7 @@ mod tests {
                 relationship: RelationshipKind::DependsOn,
                 action: RelationshipAction::Add,
                 evidence: "topic-1a runtime relies on topic-3b crash recovery guarantees.".to_string(),
+                source_urls: vec![],
             }],
             health_summary: "Framework stable.".to_string(),
             cost_usd: 0.08,

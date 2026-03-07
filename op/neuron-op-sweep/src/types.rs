@@ -58,6 +58,12 @@ pub enum ProcessorTier {
     Ultra,
 }
 
+impl Default for ProcessorTier {
+    fn default() -> Self {
+        Self::Ultra
+    }
+}
+
 /// Complete verdict produced by one sweep operator run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SweepVerdict {
@@ -89,6 +95,15 @@ pub struct SweepVerdict {
     ///
     /// Contains a unified diff or structured edit instructions.
     pub proposed_diff: Option<String>,
+    /// Raw research results from Parallel.ai preserved for citation traceability.
+    #[serde(default)]
+    pub research_inputs: Vec<crate::provider::ResearchResult>,
+    /// The search query sent to Parallel.ai for this sweep.
+    #[serde(default)]
+    pub query: String,
+    /// Which facet/angle this query covers (e.g. "scalability", "security").
+    #[serde(default)]
+    pub query_angle: String,
 }
 
 /// Lightweight sweep metadata stored after each run for deduplication.
@@ -100,6 +115,15 @@ pub struct SweepMeta {
     pub verdict: VerdictStatus,
     /// Cost of the sweep run in USD.
     pub cost_usd: f64,
+    /// Search query used for this sweep.
+    #[serde(default)]
+    pub query: String,
+    /// Query angle/facet identifier.
+    #[serde(default)]
+    pub query_angle: String,
+    /// Processor tier used for research.
+    #[serde(default)]
+    pub processor: ProcessorTier,
 }
 
 #[cfg(test)]
@@ -154,6 +178,9 @@ mod tests {
             }],
             narrative: "The decision is well-supported by current evidence.".to_string(),
             proposed_diff: None,
+            research_inputs: vec![],
+            query: String::new(),
+            query_angle: String::new(),
         };
 
         let json = serde_json::to_string(&verdict).expect("serialize");
@@ -200,6 +227,9 @@ mod tests {
             evidence: vec![],
             narrative: "Minor update needed.".to_string(),
             proposed_diff: Some("--- a/decisions/topic-1a.md\n+++ b/decisions/topic-1a.md".to_string()),
+            research_inputs: vec![],
+            query: String::new(),
+            query_angle: String::new(),
         };
         let json = serde_json::to_string(&verdict).unwrap();
         let back: SweepVerdict = serde_json::from_str(&json).unwrap();

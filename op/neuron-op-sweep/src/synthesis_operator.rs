@@ -481,6 +481,9 @@ mod tests {
             }],
             narrative: "Decision confirmed.".to_string(),
             proposed_diff: None,
+            research_inputs: vec![],
+            query: String::new(),
+            query_angle: String::new(),
         }
     }
 
@@ -492,6 +495,7 @@ mod tests {
             evidence: "Both decisions reference overlapping sources.".to_string(),
             observation_count: 1,
             confidence: 0.85,
+            source_urls: vec![],    
         }
     }
 

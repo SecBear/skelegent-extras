@@ -237,6 +237,9 @@ mod tests {
             narrative: "Durable execution patterns remain valid.\nSee supporting evidence."
                 .to_string(),
             proposed_diff: None,
+            research_inputs: vec![],
+            query: String::new(),
+            query_angle: String::new(),
         }
     }
 

@@ -220,6 +220,9 @@ pub async fn run_sweep_cycle<B: BudgetPolicy>(
                 evidence: vec![],
                 narrative: "No new evidence found".to_string(),
                 proposed_diff: None,
+                research_inputs: vec![],
+                query: String::new(),
+                query_angle: String::new(),
             });
             continue;
         }
@@ -243,6 +246,8 @@ pub async fn run_sweep_cycle<B: BudgetPolicy>(
         let compare_in = CompareInput {
             research_results: d.research_results,
             decision_id: d.id.clone(),
+            query: None,
+            query_angle: None,
         };
         let dispatch_result = dispatch_typed::<CompareInput, SweepVerdict>(
             orch,
@@ -485,6 +490,9 @@ mod tests {
             }],
             narrative: "Confirmed by research".to_string(),
             proposed_diff: None,
+            research_inputs: vec![],
+            query: String::new(),
+            query_angle: String::new(),    
         }
     }
 

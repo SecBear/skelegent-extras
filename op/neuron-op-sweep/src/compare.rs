@@ -86,6 +86,10 @@ pub struct CompareConfig {
     /// Longer verdicts with detailed diffs may need a higher limit.
     /// Default: 4096.
     pub max_response_tokens: usize,
+
+    /// When true, always use Ultra processor regardless of budget or prior verdict.
+    /// Default: true.
+    pub force_ultra: bool,
 }
 
 impl Default for CompareConfig {
@@ -96,6 +100,7 @@ impl Default for CompareConfig {
             max_artifacts: 20,
             model: "claude-sonnet-4-20250514".to_string(),
             max_response_tokens: 4096,
+            force_ultra: true,
         }
     }
 }
@@ -130,6 +135,23 @@ pub fn select_processor(
                 ProcessorTier::Base
             }
         }
+    }
+}
+
+/// Select processor tier, respecting the force_ultra override.
+///
+/// When `force_ultra` is true, always returns [`ProcessorTier::Ultra`].
+/// Otherwise delegates to [`select_processor`] for adaptive selection.
+pub fn resolve_processor(
+    config: &CompareConfig,
+    budget_remaining_usd: f64,
+    budget_total_usd: f64,
+    previous_verdict: Option<&VerdictStatus>,
+) -> ProcessorTier {
+    if config.force_ultra {
+        ProcessorTier::Ultra
+    } else {
+        select_processor(budget_remaining_usd, budget_total_usd, previous_verdict)
     }
 }
 
@@ -313,6 +335,12 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
                 ))
             })?
         };
+        let verdict = SweepVerdict {
+            research_inputs: compare_in.research_results,
+            query: compare_in.query.unwrap_or_default(),
+            query_angle: compare_in.query_angle.unwrap_or_default(),
+            ..verdict
+        };
 
         // Write own-scope sweep metadata directly (not an effect — same scope).
         let meta_key = format!("meta:{}:last_sweep", decision_id);
@@ -320,6 +348,9 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
             swept_at: chrono::Utc::now().to_rfc3339(),
             verdict: verdict.status.clone(),
             cost_usd: verdict.cost_usd,
+            query: verdict.query.clone(),
+            query_angle: verdict.query_angle.clone(),
+            processor: verdict.processor.clone(),
         };
         if let Ok(meta_value) = serde_json::to_value(&meta) {
             // Best-effort: ignore write errors on own-scope metadata.
@@ -469,6 +500,9 @@ mod tests {
             }],
             narrative: "Confirmed by research".to_string(),
             proposed_diff: None,
+            research_inputs: vec![],
+            query: String::new(),
+            query_angle: String::new(),
         }
     }
 
@@ -600,6 +634,8 @@ mod tests {
         let compare_in = crate::provider::CompareInput {
             research_results: vec![dummy_result()],
             decision_id: "topic-3b".to_string(),
+            query: None,
+            query_angle: None,
         };
         let msg = serde_json::to_string(&compare_in).unwrap();
         let input = OperatorInput::new(Content::text(msg), TriggerType::Task);
@@ -621,6 +657,8 @@ mod tests {
         let compare_in = crate::provider::CompareInput {
             research_results: vec![dummy_result()],
             decision_id: "topic-3b".to_string(),
+            query: None,
+            query_angle: None,
         };
         let msg = serde_json::to_string(&compare_in).unwrap();
         let input = OperatorInput::new(Content::text(msg), TriggerType::Task);
@@ -645,6 +683,8 @@ mod tests {
         let compare_in = crate::provider::CompareInput {
             research_results: vec![dummy_result()],
             decision_id: "topic-3b".to_string(),
+            query: None,
+            query_angle: None,
         };
         let msg = serde_json::to_string(&compare_in).unwrap();
         let input = OperatorInput::new(Content::text(msg), TriggerType::Task);
@@ -678,4 +718,22 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn resolve_processor_force_ultra_ignores_budget() {
+        let config = CompareConfig { force_ultra: true, ..CompareConfig::default() };
+        assert_eq!(
+            resolve_processor(&config, 0.0, 10.0, Some(&VerdictStatus::Confirmed)),
+            ProcessorTier::Ultra,
+        );
+    }
+
+    #[test]
+    fn resolve_processor_adaptive_when_not_forced() {
+        let config = CompareConfig { force_ultra: false, ..CompareConfig::default() };
+        assert_eq!(
+            resolve_processor(&config, 1.0, 10.0, Some(&VerdictStatus::Confirmed)),
+            ProcessorTier::Base,
+        );
+    }
+
 }
