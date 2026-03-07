@@ -21,6 +21,7 @@ thiserror = "1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 neuron-orch-kit = { path = "../../orch/neuron-orch-kit", version = "0.1.0" }
 rust_decimal = "1"
+tracing = "0.1"
 
 [dev-dependencies]
 layer0 = { path = "../../../neuron/layer0", features = ["test-utils"] }

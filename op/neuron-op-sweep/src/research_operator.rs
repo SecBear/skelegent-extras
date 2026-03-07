@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use layer0::{Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput};
+use tracing::{debug, info};
 
 use crate::provider::{ResearchInput, ResearchMode, ResearchResult, ResearchSource, SweepError};
 
@@ -40,6 +41,15 @@ impl<R: ResearchSource> Operator for ResearchOperator<R> {
         let req: ResearchInput = serde_json::from_str(text).map_err(|e| {
             OperatorError::NonRetryable(format!("ResearchOperator: invalid input: {e}"))
         })?;
+
+        info!(
+            decision_id = %req.decision_id,
+            mode = ?req.mode,
+            processor = %req.processor,
+            query = %req.query,
+            query_angle = %req.query_angle,
+            "research: starting"
+        );
 
         let start = Instant::now();
         let results: Vec<ResearchResult> = match req.mode {
@@ -71,11 +81,26 @@ impl<R: ResearchSource> Operator for ResearchOperator<R> {
         let elapsed = start.elapsed();
         let count = results.len();
 
-        eprintln!(
-            "research [{id}] {mode:?} → {count} results in {elapsed:.1?}",
-            id = req.decision_id,
-            mode = req.mode,
+        info!(
+            decision_id = %req.decision_id,
+            mode = ?req.mode,
+            processor = %req.processor,
+            num_results = count,
+            duration_ms = elapsed.as_millis() as u64,
+            "research: completed"
         );
+
+        // Log individual result URLs at debug level for traceability.
+        for (i, r) in results.iter().enumerate() {
+            debug!(
+                decision_id = %req.decision_id,
+                idx = i,
+                url = %r.url,
+                title = %r.title,
+                snippet_chars = r.snippet.len(),
+                "research: result"
+            );
+        }
 
         let body = serde_json::to_string(&results).map_err(|e| {
             OperatorError::NonRetryable(format!("ResearchOperator: serialize error: {e}"))

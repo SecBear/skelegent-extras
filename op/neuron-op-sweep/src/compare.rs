@@ -13,13 +13,16 @@
 //! [`Orchestrator`]: layer0::Orchestrator
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use layer0::operator::OperatorMetadata;
 use layer0::state::MemoryTier;
 use layer0::{Content, Effect, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, Scope};
 use neuron_orch_kit::ScopedState;
 use neuron_turn::provider::{Provider, ProviderError};
 use neuron_turn::types::{ContentPart, ProviderMessage, ProviderRequest, Role};
+use rust_decimal::Decimal;
+use tracing::{debug, info};
 
 use crate::provider::CompareInput;
 use crate::types::{ProcessorTier, SweepMeta, SweepVerdict, VerdictStatus};
@@ -256,6 +259,8 @@ impl<P: Provider> CompareOperator<P> {
 #[async_trait::async_trait]
 impl<P: Provider + 'static> Operator for CompareOperator<P> {
     async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
+        let start = Instant::now();
+
         // Parse the typed input — both research results and decision_id come
         // from the CompareInput struct embedded in the message.
         let msg_text = input
@@ -275,6 +280,16 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
         let research_json = serde_json::to_string(&compare_in.research_results)
             .unwrap_or_else(|_| "[]".to_string());
         let decision_id = compare_in.decision_id;
+        let num_research = compare_in.research_results.len();
+
+        info!(
+            decision_id = %decision_id,
+            num_research_results = num_research,
+            query = compare_in.query.as_deref().unwrap_or(""),
+            query_angle = compare_in.query_angle.as_deref().unwrap_or(""),
+            model = %self.config.model,
+            "compare: starting LLM comparison"
+        );
 
         // --- Turn-owned context assembly ---
         // Read the decision card from own-scope state.
@@ -316,6 +331,13 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
             "Decision ID: {}\n\n<decision>\n{}\n</decision>\n\n<prior_findings>\n{}\n</prior_findings>\n\n<research>\n{}\n</research>",
             decision_id, decision_text, prior_findings_json, research_json
         );
+
+        debug!(
+            decision_id = %decision_id,
+            prompt_chars = user_content.len(),
+            system_prompt_chars = COMPARISON_SYSTEM_PROMPT.len(),
+            "compare: full user prompt\n{user_content}"
+        );
         let request = ProviderRequest {
             model: Some(self.config.model.clone()),
             messages: vec![ProviderMessage {
@@ -352,6 +374,24 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
                 }
             })
             .unwrap_or("");
+
+        let llm_elapsed = start.elapsed();
+        info!(
+            decision_id = %decision_id,
+            tokens_in = response.usage.input_tokens,
+            tokens_out = response.usage.output_tokens,
+            cache_read = response.usage.cache_read_tokens,
+            cache_create = response.usage.cache_creation_tokens,
+            cost_usd = %response.cost.unwrap_or(Decimal::ZERO),
+            model = %response.model,
+            duration_ms = llm_elapsed.as_millis() as u64,
+            "compare: LLM response received"
+        );
+        debug!(
+            decision_id = %decision_id,
+            raw_len = raw.len(),
+            "compare: raw LLM output\n{raw}"
+        );
 
         // Parse the JSON verdict (may be fenced ```json ... ```).
         let verdict: SweepVerdict = {
@@ -413,6 +453,31 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
             serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".to_string());
         let mut output = OperatorOutput::new(Content::text(verdict_json), ExitReason::Complete);
         output.effects = effects;
+
+        // Populate metadata from the LLM response (not LLM-generated guesses).
+        let total_elapsed = start.elapsed();
+        let duration = layer0::duration::DurationMs::from(total_elapsed);
+        let mut metadata = OperatorMetadata::default();
+        metadata.tokens_in = response.usage.input_tokens;
+        metadata.tokens_out = response.usage.output_tokens;
+        metadata.cost = response.cost.unwrap_or(Decimal::ZERO);
+        metadata.turns_used = 1;
+        metadata.duration = duration;
+        output.metadata = metadata;
+
+        info!(
+            decision_id = %decision_id,
+            status = ?verdict.status,
+            confidence = verdict.confidence,
+            num_supporting = verdict.num_supporting,
+            num_contradicting = verdict.num_contradicting,
+            cost_usd = %output.metadata.cost,
+            tokens_in = output.metadata.tokens_in,
+            tokens_out = output.metadata.tokens_out,
+            duration_ms = total_elapsed.as_millis() as u64,
+            "compare: verdict produced"
+        );
+
         Ok(output)
     }
 }
