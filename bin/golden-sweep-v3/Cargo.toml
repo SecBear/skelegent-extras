@@ -1,0 +1,41 @@
+[package]
+name = "golden-sweep-v3"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Sweep runner v3 — built on neuron-context-engine primitives"
+
+[[bin]]
+name = "golden-sweep-v3"
+path = "src/main.rs"
+
+[dependencies]
+layer0 = { path = "../../../neuron/layer0", version = "0.4.0", features = ["test-utils"] }
+neuron-turn = { path = "../../../neuron/turn/neuron-turn", version = "0.4.0" }
+neuron-tool = { path = "../../../neuron/turn/neuron-tool", version = "0.4.0" }
+neuron-context-engine = { path = "../../../neuron/op/neuron-context-engine", version = "0.4.0" }
+neuron-op-sweep-v2 = { path = "../../op/neuron-op-sweep-v2" }
+neuron-orch-kit = { path = "../../orch/neuron-orch-kit" }
+neuron-client-parallel = { path = "../../client/neuron-client-parallel" }
+neuron-state-sqlite = { path = "../../state/neuron-state-sqlite" }
+neuron-provider-anthropic = { path = "../../../neuron/provider/neuron-provider-anthropic" }
+neuron-auth = { path = "../../../neuron/auth/neuron-auth", version = "0.4.0" }
+neuron-auth-pi = { path = "../../auth/neuron-auth-pi" }
+neuron-auth-omp = { path = "../../auth/neuron-auth-omp" }
+anyhow = "1"
+async-trait = "0.1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+rust_decimal = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+layer0 = { path = "../../../neuron/layer0", features = ["test-utils"], version = "0.4.0" }
+neuron-turn = { path = "../../../neuron/turn/neuron-turn", features = ["test-utils"], version = "0.4.0" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
