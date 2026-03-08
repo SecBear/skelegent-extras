@@ -29,10 +29,11 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
-use layer0::context::{Message, Role};
 use layer0::duration::DurationMs;
 use layer0::operator::OperatorMetadata;
-use layer0::{Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput};
+use layer0::content::Content;
+use layer0::context::{Message, Role};
+use layer0::{ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput};
 use neuron_orch_kit::ScopedState;
 use neuron_turn::infer::InferRequest;
 use neuron_turn::provider::{Provider, ProviderError};
@@ -223,9 +224,17 @@ impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
             "{min_flag_confidence}",
             &self.config.min_flag_confidence.to_string(),
         );
-        let pass1_request = InferRequest::new(vec![Message::new(Role::User, Content::text(verdicts_json))])
-            .with_model(self.config.model.clone())
-            .with_system(pass1_system);
+        let context = [Message::new(Role::User, Content::text(&verdicts_json))];
+
+        let pass1_request = InferRequest {
+            model: Some(self.config.model.clone()),
+            messages: context.to_vec(),
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            system: Some(pass1_system),
+            extra: serde_json::Value::Null,
+        };
         let pass1_response = self.llm.infer(pass1_request).await.map_err(map_provider_err)?;
 
         let mut total_cost_usd: f64 = pass1_response.cost.and_then(|d| d.to_f64()).unwrap_or(0.0);
@@ -242,7 +251,7 @@ impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
             "synthesis: pass 1 complete"
         );
 
-        let pass1_raw = pass1_response.text().unwrap_or("");
+        let pass1_raw = pass1_response.content.as_text().unwrap_or("");
 
         let all_flags: Vec<FlaggedItem> = {
             let json_str = extract_json_block(pass1_raw);
@@ -297,9 +306,17 @@ impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
                 .replace("{flag.decision_ids}", &decision_ids_str)
                 .replace("{full_cards_and_deltas}", &cards_and_deltas);
 
-            let pass2_request = InferRequest::new(vec![Message::new(Role::User, Content::text("Produce the deep analysis."))])
-                .with_model(self.config.model.clone())
-                .with_system(pass2_system);
+            let context = [Message::new(Role::User, Content::text("Produce the deep analysis."))];
+
+            let pass2_request = InferRequest {
+                model: Some(self.config.model.clone()),
+                messages: context.to_vec(),
+                tools: vec![],
+                max_tokens: None,
+                temperature: None,
+                system: Some(pass2_system),
+                extra: serde_json::Value::Null,
+            };
 
             let pass2_response =
                 self.llm.infer(pass2_request).await.map_err(map_provider_err)?;
@@ -316,7 +333,7 @@ impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
                 "synthesis: pass 2 deep dive"
             );
 
-            let pass2_raw = pass2_response.text().unwrap_or("");
+            let pass2_raw = pass2_response.content.as_text().unwrap_or("");
 
             let json_str = extract_json_block(pass2_raw);
             match serde_json::from_str::<Pass2Result>(json_str) {
@@ -388,8 +405,10 @@ mod tests {
     use crate::types::{EvidenceItem, EvidenceStance, ProcessorTier, VerdictStatus};
     use layer0::operator::TriggerType;
     use layer0::{SearchResult, StateError};
-    use neuron_turn::test_utils::TestProvider;
-    use std::sync::Arc;
+    use neuron_turn::infer::InferResponse;
+    use neuron_turn::test_utils::FunctionProvider;
+    use neuron_turn::types::{StopReason, TokenUsage};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // -----------------------------------------------------------------------
     // Mock state
@@ -429,14 +448,21 @@ mod tests {
         }
     }
 
-    /// Build a TestProvider pre-loaded with pass1 + N pass2 responses.
-    fn counting_provider_with_dives(pass1_json: &str, pass2_json: &str, n_dives: usize) -> TestProvider {
-        let provider = TestProvider::new();
-        provider.respond_with_text(pass1_json);
-        for _ in 0..n_dives {
-            provider.respond_with_text(pass2_json);
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /// Build an `InferResponse` with text content and a small cost.
+    fn text_response(text: &str) -> InferResponse {
+        InferResponse {
+            content: Content::text(text),
+            tool_calls: vec![],
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+            model: "mock".into(),
+            cost: Some(rust_decimal::Decimal::new(1, 2)),
+            truncated: None,
         }
-        provider
     }
 
     // -----------------------------------------------------------------------
@@ -459,7 +485,6 @@ mod tests {
                 title: String::new(),
                 summary: "Supports decision".into(),
                 stance: EvidenceStance::Supporting,
-                retrieved_at: "2026-03-06T00:00:00Z".into(),
             }],
             narrative: "Decision confirmed.".to_string(),
             proposed_diff: None,
@@ -529,8 +554,16 @@ mod tests {
         let pass1_json = high_confidence_flags_json(1);
         let pass2_json =
             serde_json::to_string(&canned_structural_change()).expect("serializable");
+        let call_count = Arc::new(AtomicUsize::new(0));
 
-        let provider = counting_provider_with_dives(&pass1_json, &pass2_json, 1);
+        let cc = call_count.clone();
+        let p1 = pass1_json.clone();
+        let p2 = pass2_json.clone();
+        let provider = FunctionProvider::new(move |_req| {
+            let n = cc.fetch_add(1, Ordering::SeqCst);
+            let json = if n == 0 { p1.clone() } else { p2.clone() };
+            Ok(text_response(&json))
+        });
         let op = SynthesisOperator::new(provider, Arc::new(MockState), SynthesisConfig::default());
 
         let input = OperatorInput::new(Content::text(synthesis_input_json(2)), TriggerType::Task);
@@ -540,6 +573,8 @@ mod tests {
         let report: SynthesisReport =
             serde_json::from_str(text).expect("output should be valid SynthesisReport JSON");
 
+        // 1 Pass 1 call + 1 Pass 2 call = 2 total.
+        assert_eq!(call_count.load(Ordering::SeqCst), 2, "expected 2 LLM calls");
         assert_eq!(report.structural_changes.len(), 1);
         assert_eq!(report.structural_changes[0].change_type, StructuralChangeType::Convergence);
     }
@@ -550,10 +585,14 @@ mod tests {
     async fn synthesis_operator_skips_low_confidence_flags() {
         // All 3 flags are below the default threshold of 0.6.
         let pass1_json = low_confidence_flags_json(3);
+        let call_count = Arc::new(AtomicUsize::new(0));
 
-        // Only queue pass1 — if pass2 were called, TestProvider would panic (empty queue).
-        let provider = TestProvider::new();
-        provider.respond_with_text(&pass1_json);
+        let cc = call_count.clone();
+        let p1 = pass1_json.clone();
+        let provider = FunctionProvider::new(move |_req| {
+            cc.fetch_add(1, Ordering::SeqCst);
+            Ok(text_response(&p1))
+        });
         let op = SynthesisOperator::new(provider, Arc::new(MockState), SynthesisConfig::default());
 
         let input = OperatorInput::new(Content::text(synthesis_input_json(2)), TriggerType::Task);
@@ -563,6 +602,12 @@ mod tests {
         let report: SynthesisReport =
             serde_json::from_str(text).expect("output should be valid SynthesisReport JSON");
 
+        // Only Pass 1 was called.
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "Pass 2 must not be called when all flags are below threshold"
+        );
         assert!(report.structural_changes.is_empty());
         assert!(report.candidates.is_empty());
     }
@@ -575,14 +620,20 @@ mod tests {
         let pass1_json = high_confidence_flags_json(20);
         let pass2_json =
             serde_json::to_string(&canned_structural_change()).expect("serializable");
+        let call_count = Arc::new(AtomicUsize::new(0));
 
         // Default config: max_deep_dives = 10.
         let config = SynthesisConfig::default();
         let max_dives = config.max_deep_dives;
 
-        // Queue exactly 1 pass1 + max_dives pass2 responses.
-        // If extra calls were made, TestProvider would panic.
-        let provider = counting_provider_with_dives(&pass1_json, &pass2_json, max_dives);
+        let cc = call_count.clone();
+        let p1 = pass1_json.clone();
+        let p2 = pass2_json.clone();
+        let provider = FunctionProvider::new(move |_req| {
+            let n = cc.fetch_add(1, Ordering::SeqCst);
+            let json = if n == 0 { p1.clone() } else { p2.clone() };
+            Ok(text_response(&json))
+        });
         let op = SynthesisOperator::new(provider, Arc::new(MockState), config);
 
         let input = OperatorInput::new(Content::text(synthesis_input_json(2)), TriggerType::Task);
@@ -592,6 +643,12 @@ mod tests {
         let report: SynthesisReport =
             serde_json::from_str(text).expect("output should be valid SynthesisReport JSON");
 
+        let expected_calls = 1 + max_dives;
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            expected_calls,
+            "expected exactly {expected_calls} LLM calls (1 pass1 + {max_dives} pass2)"
+        );
         assert_eq!(
             report.structural_changes.len(),
             max_dives,

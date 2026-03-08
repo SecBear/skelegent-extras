@@ -398,7 +398,7 @@ async fn complex_json_round_trip() {
         "nested": {"array": [1, 2, 3]},
         "bool": true,
         "null_field": null,
-        "float": 3.14
+        "float": 1.234
     });
 
     s.write(&scope, "complex", complex.clone()).await.unwrap();

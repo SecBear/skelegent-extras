@@ -246,8 +246,8 @@ pub async fn run_sweep_cycle<B: BudgetPolicy>(
         let compare_in = CompareInput {
             research_results: d.research_results,
             decision_id: d.id.clone(),
-            query: None,
-            query_angle: None,
+            query: String::new(),
+            query_angle: String::new(),
         };
         let dispatch_result = dispatch_typed::<CompareInput, SweepVerdict>(
             orch,
@@ -284,7 +284,7 @@ pub async fn run_sweep_cycle<B: BudgetPolicy>(
         // ------------------------------------------------------------------
         // Step 9: COLLECT
         // ------------------------------------------------------------------
-        report.cost.comparison_cost_usd += verdict.cost_usd;
+        report.cost.comparison_cost += verdict.cost_usd;
         report.verdicts.push(verdict);
     }
 
@@ -487,7 +487,6 @@ mod tests {
                 title: String::new(),
                 summary: "Supports decision".into(),
                 stance: EvidenceStance::Supporting,
-                retrieved_at: "2026-03-04T00:00:00Z".into(),
             }],
             narrative: "Confirmed by research".to_string(),
             proposed_diff: None,

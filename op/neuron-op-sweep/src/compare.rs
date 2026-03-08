@@ -15,12 +15,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use layer0::context::{Message, Role};
 use layer0::operator::OperatorMetadata;
 use layer0::state::MemoryTier;
 use layer0::{Content, Effect, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, Scope};
 use neuron_orch_kit::ScopedState;
+use neuron_turn::infer::InferRequest;
 use neuron_turn::provider::{Provider, ProviderError};
-use neuron_turn::types::{ContentPart, ProviderMessage, ProviderRequest, Role};
 use rust_decimal::Decimal;
 use tracing::{debug, info};
 
@@ -338,20 +339,12 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
             system_prompt_chars = COMPARISON_SYSTEM_PROMPT.len(),
             "compare: full user prompt\n{user_content}"
         );
-        let request = ProviderRequest {
-            model: Some(self.config.model.clone()),
-            messages: vec![ProviderMessage {
-                role: Role::User,
-                content: vec![ContentPart::Text { text: user_content }],
-            }],
-            tools: vec![],
-            max_tokens: Some(self.config.max_response_tokens as u32),
-            temperature: None,
-            system: Some(COMPARISON_SYSTEM_PROMPT.to_string()),
-            extra: serde_json::Value::Null,
-        };
+        let request = InferRequest::new(vec![Message::new(Role::User, Content::text(user_content))])
+            .with_model(self.config.model.clone())
+            .with_system(COMPARISON_SYSTEM_PROMPT)
+            .with_max_tokens(self.config.max_response_tokens as u32);
 
-        let response = self.llm.complete(request).await.map_err(|e| match e {
+        let response = self.llm.infer(request).await.map_err(|e| match e {
             ProviderError::RateLimited => {
                 OperatorError::Retryable("rate limited by LLM provider".into())
             }
@@ -363,17 +356,7 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
         })?;
 
         // Extract text content from the LLM response.
-        let raw = response
-            .content
-            .iter()
-            .find_map(|p| {
-                if let ContentPart::Text { text } = p {
-                    Some(text.as_str())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or("");
+        let raw = response.text().unwrap_or("");
 
         let llm_elapsed = start.elapsed();
         info!(
@@ -492,8 +475,7 @@ mod tests {
     use crate::types::{EvidenceItem, EvidenceStance, ProcessorTier};
     use layer0::operator::TriggerType;
     use layer0::StateError;
-    use neuron_turn::provider::{Provider, ProviderError};
-    use neuron_turn::types::{ProviderResponse, StopReason, TokenUsage};
+    use neuron_turn::test_utils::TestProvider;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -608,29 +590,12 @@ mod tests {
         }
     }
 
-    /// Shared mock LLM provider that returns a fixed verdict as JSON.
-    struct MockLlmProvider {
-        verdict: SweepVerdict,
-    }
-
-    impl Provider for MockLlmProvider {
-        fn complete(
-            &self,
-            _request: ProviderRequest,
-        ) -> impl std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send
-        {
-            let json = serde_json::to_string(&self.verdict).expect("verdict serializable");
-            async move {
-                Ok(ProviderResponse {
-                    content: vec![ContentPart::Text { text: json }],
-                    stop_reason: StopReason::EndTurn,
-                    usage: TokenUsage::default(),
-                    model: "mock".into(),
-                    cost: None,
-                    truncated: None,
-                })
-            }
-        }
+    /// Build a TestProvider that returns the serialized verdict JSON.
+    fn verdict_provider(verdict: &SweepVerdict) -> TestProvider {
+        let json = serde_json::to_string(verdict).expect("verdict serializable");
+        let provider = TestProvider::new();
+        provider.respond_with_text(&json);
+        provider
     }
 
     // -----------------------------------------------------------------------
@@ -720,7 +685,7 @@ mod tests {
     #[tokio::test]
     async fn compare_operator_returns_verdict_json() {
         let expected = dummy_verdict("topic-3b");
-        let mock = MockLlmProvider { verdict: expected.clone() };
+        let mock = verdict_provider(&expected);
         let state = Arc::new(MockScopedState::new());
         let op = CompareOperator::new(mock, state, CompareConfig::default());
 
@@ -742,7 +707,7 @@ mod tests {
 
     #[tokio::test]
     async fn compare_operator_writes_meta_to_own_scope() {
-        let mock = MockLlmProvider { verdict: dummy_verdict("topic-3b") };
+        let mock = verdict_provider(&dummy_verdict("topic-3b"));
         let state = Arc::new(MockScopedState::new());
         let state_ref = state.clone();
         let op = CompareOperator::new(mock, state, CompareConfig::default());
@@ -769,7 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn compare_operator_declares_delta_effect() {
-        let mock = MockLlmProvider { verdict: dummy_verdict("topic-3b") };
+        let mock = verdict_provider(&dummy_verdict("topic-3b"));
         let state = Arc::new(MockScopedState::new());
         let op = CompareOperator::new(mock, state, CompareConfig::default());
 

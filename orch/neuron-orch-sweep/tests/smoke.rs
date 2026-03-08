@@ -24,8 +24,9 @@ use neuron_orch_kit::{dispatch_typed, ScopedStateView};
 use neuron_orch_sweep::{
     BudgetConfig, BudgetState, CycleReport, OrchestratorConfig, QueuedDecision, run_cycle,
 };
+use neuron_turn::infer::{InferRequest, InferResponse};
 use neuron_turn::provider::{Provider, ProviderError};
-use neuron_turn::types::{ContentPart, ProviderRequest, ProviderResponse, StopReason, TokenUsage};
+use neuron_turn::types::{StopReason, TokenUsage};
 use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -91,23 +92,19 @@ fn test_research_result() -> ResearchResult {
 struct TestLlm;
 
 impl Provider for TestLlm {
-    fn complete(
+    fn infer(
         &self,
-        req: ProviderRequest,
-    ) -> impl std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send {
+        req: InferRequest,
+    ) -> impl std::future::Future<Output = Result<InferResponse, ProviderError>> + Send {
         // CompareOperator formats: "Decision ID: {id}\n\n<research>..."
         let decision_id = req
             .messages
             .first()
-            .and_then(|m| m.content.first())
-            .and_then(|c| {
-                if let ContentPart::Text { text } = c {
-                    text.strip_prefix("Decision ID: ")
-                        .and_then(|s| s.split('\n').next())
-                        .map(str::to_string)
-                } else {
-                    None
-                }
+            .map(|m| m.text_content())
+            .and_then(|text| {
+                text.strip_prefix("Decision ID: ")
+                    .and_then(|s| s.split('\n').next())
+                    .map(str::to_string)
             })
             .unwrap_or_default();
 
@@ -144,8 +141,9 @@ impl Provider for TestLlm {
         };
         let json = serde_json::to_string(&verdict).expect("serialize verdict");
         async move {
-            Ok(ProviderResponse {
-                content: vec![ContentPart::Text { text: json }],
+            Ok(InferResponse {
+                content: layer0::content::Content::text(json),
+                tool_calls: vec![],
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
                 model: "mock".into(),
@@ -212,7 +210,7 @@ async fn smoke_full_cycle_with_three_decisions() {
     let store_clone = Arc::clone(&store);
     let operator =
         move |id: String,
-              prev: Option<VerdictStatus>|
+              _prev: Option<VerdictStatus>|
               -> Pin<Box<dyn std::future::Future<Output = SweepVerdict> + Send + 'static>> {
             let s = Arc::clone(&store_clone);
             Box::pin(async move {
@@ -316,7 +314,7 @@ async fn smoke_budget_exhaustion_stops_cycle() {
     let store_clone = Arc::clone(&store);
     let operator =
         move |id: String,
-              prev: Option<VerdictStatus>|
+              _prev: Option<VerdictStatus>|
               -> Pin<Box<dyn std::future::Future<Output = SweepVerdict> + Send + 'static>> {
             let s = Arc::clone(&store_clone);
             Box::pin(async move {
