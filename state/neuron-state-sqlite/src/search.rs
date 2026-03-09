@@ -7,7 +7,7 @@ use rusqlite::{Connection, params};
 use std::collections::HashSet;
 
 /// A raw FTS5 search result before mapping to `SearchResult`.
-pub(crate) struct FtsMatch {
+pub struct FtsMatch {
     /// The matched key.
     pub key: String,
     /// BM25 relevance score (lower is more relevant in SQLite FTS5).
@@ -16,15 +16,21 @@ pub(crate) struct FtsMatch {
     pub snippet: Option<String>,
 }
 
-/// Execute an FTS5 search within a scope.
+/// Execute an FTS5 full-text search within a scope.
 ///
-/// Returns results ranked by BM25 (converted to descending score: higher = better).
-/// The `query` is passed directly to FTS5 MATCH — callers should sanitize if needed.
+/// Returns results ranked by BM25 (higher score = more relevant).
+/// The `query` is passed directly to FTS5 MATCH — callers should
+/// sanitize if needed.
+///
+/// This is the low-level search primitive used by
+/// [`SqliteStore`](crate::SqliteStore)'s [`StateStore::search()`] implementation.
+/// Use it directly when you need BM25 scores and snippets that the
+/// [`StateStore`] trait doesn't expose.
 ///
 /// # Errors
 ///
-/// Returns `rusqlite::Error` on query failure.
-pub(crate) fn fts5_search(
+/// Returns `rusqlite::Error` on query failure (including invalid FTS5 syntax).
+pub fn fts5_search(
     conn: &Connection,
     scope_str: &str,
     query: &str,
