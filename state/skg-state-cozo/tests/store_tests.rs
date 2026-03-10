@@ -4,10 +4,92 @@
 
 use layer0::effect::Scope;
 use layer0::id::{OperatorId, SessionId, WorkflowId};
-use layer0::state::{MemoryLink, StateStore};
+use layer0::state::{Lifetime, MemoryLink, StateStore, StoreOptions};
 use skg_state_cozo::CozoStore;
 use serde_json::json;
 
+
+// ── transient ────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn transient_write_is_readable() {
+    let s = store();
+    let scope = Scope::Global;
+    let opts = StoreOptions { lifetime: Some(Lifetime::Transient), ..Default::default() };
+
+    s.write_hinted(&scope, "scratch", json!("temp"), &opts).await.unwrap();
+    let got = s.read(&scope, "scratch").await.unwrap();
+    assert_eq!(got, Some(json!("temp")), "transient write must be readable");
+}
+
+#[tokio::test]
+async fn transient_cleared_by_clear_transient() {
+    let s = store();
+    let scope = Scope::Global;
+    let opts = StoreOptions { lifetime: Some(Lifetime::Transient), ..Default::default() };
+
+    s.write_hinted(&scope, "scratch", json!(42), &opts).await.unwrap();
+    s.clear_transient();
+    let got = s.read(&scope, "scratch").await.unwrap();
+    assert_eq!(got, None, "transient entry must be gone after clear_transient");
+}
+
+#[tokio::test]
+async fn durable_write_survives_clear_transient() {
+    let s = store();
+    let scope = Scope::Global;
+
+    s.write(&scope, "durable", json!("keep me")).await.unwrap();
+    s.clear_transient();
+    let got = s.read(&scope, "durable").await.unwrap();
+    assert_eq!(got, Some(json!("keep me")), "durable entry must survive clear_transient");
+}
+
+#[tokio::test]
+async fn transient_shadows_durable_until_cleared() {
+    let s = store();
+    let scope = Scope::Global;
+    let opts = StoreOptions { lifetime: Some(Lifetime::Transient), ..Default::default() };
+
+    // Write a durable value, then shadow it with a transient one.
+    s.write(&scope, "key", json!("durable")).await.unwrap();
+    s.write_hinted(&scope, "key", json!("transient"), &opts).await.unwrap();
+
+    let got = s.read(&scope, "key").await.unwrap();
+    assert_eq!(got, Some(json!("transient")), "transient must shadow durable while present");
+
+    s.clear_transient();
+    let after = s.read(&scope, "key").await.unwrap();
+    assert_eq!(after, Some(json!("durable")), "durable must resurface after clear_transient");
+}
+
+#[tokio::test]
+async fn write_hinted_without_transient_lifetime_is_durable() {
+    let s = store();
+    let scope = Scope::Global;
+    let opts = StoreOptions { lifetime: Some(Lifetime::Durable), ..Default::default() };
+
+    s.write_hinted(&scope, "perm", json!("stays"), &opts).await.unwrap();
+    s.clear_transient();
+    let got = s.read(&scope, "perm").await.unwrap();
+    assert_eq!(got, Some(json!("stays")), "non-transient write_hinted must not be cleared");
+}
+
+#[tokio::test]
+async fn clear_transient_multiple_entries() {
+    let s = store();
+    let scope = Scope::Global;
+    let opts = StoreOptions { lifetime: Some(Lifetime::Transient), ..Default::default() };
+
+    for i in 0..5 {
+        s.write_hinted(&scope, &format!("t:{i}"), json!(i), &opts).await.unwrap();
+    }
+    s.clear_transient();
+    for i in 0..5 {
+        let got = s.read(&scope, &format!("t:{i}")).await.unwrap();
+        assert_eq!(got, None, "t:{i} must be gone after clear_transient");
+    }
+}
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn store() -> CozoStore {

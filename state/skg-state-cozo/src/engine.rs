@@ -245,6 +245,7 @@ impl CozoEngine {
             crate::schema::KV_DDL,
             crate::schema::NODE_V2_DDL,
             crate::schema::EDGE_DDL,
+            crate::schema::TRANSIENT_DDL,
         ] {
             self.db
                 .run_script(ddl, Default::default(), cozo::ScriptMutability::Mutable)

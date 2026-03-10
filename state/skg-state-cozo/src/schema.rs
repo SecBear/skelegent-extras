@@ -75,19 +75,32 @@ pub const KV_FTS_DDL: &str = r#"::fts create kv:fts_val {
     filters: [Lowercase],
 }"#;
 
+/// DDL for the transient key-value relation.
+///
+/// Stores entries written with [`Lifetime::Transient`]. Cleared at turn
+/// boundaries via [`CozoStore::clear_transient`]. Never promoted to the
+/// durable `kv` relation.
+///
+/// [`Lifetime::Transient`]: layer0::state::Lifetime
+/// [`CozoStore::clear_transient`]: crate::store::CozoStore
+pub const TRANSIENT_DDL: &str =
+    ":create kv_transient { scope: String, key: String => value: String, created_at: Float }";
+
 /// Complete schema initialization script.
 ///
-/// Runs all three relation DDL statements as a single batch. In CozoDB, `:create` is
+/// Runs all four relation DDL statements as a single batch. In CozoDB, `:create` is
 /// idempotent — it creates the relation only if it does not exist. This script
 /// can be executed multiple times on the same database safely.
 ///
-/// This string is a verbatim concatenation of [`KV_DDL`], [`NODE_V2_DDL`], and
-/// [`EDGE_DDL`], separated by newlines. When the `rocksdb` feature is enabled,
-/// pass this to `DbInstance::run_script` inside [`CozoEngine::ensure_schema`].
+/// This string is a verbatim concatenation of [`KV_DDL`], [`NODE_V2_DDL`],
+/// [`EDGE_DDL`], and [`TRANSIENT_DDL`], separated by newlines. When the
+/// `rocksdb` feature is enabled, pass this to `DbInstance::run_script` inside
+/// [`CozoEngine::ensure_schema`].
 ///
 /// **Note:** [`KV_FTS_DDL`] and [`NODE_HNSW_DDL`] are intentionally excluded —
 /// index DDL must be run as separate script calls.
 pub const DDL_INIT: &str = "\
 :create kv { scope: String, key: String => value: String, created_at: Float }
 :create node { scope: String, key: String => data: String, node_type: String, salience: Float, embedding: <F32; 1536>, created_at: Float }
-:create edge { scope: String, from_key: String, to_key: String, relation: String => metadata: String, created_at: Float }";
+:create edge { scope: String, from_key: String, to_key: String, relation: String => metadata: String, created_at: Float }
+:create kv_transient { scope: String, key: String => value: String, created_at: Float }";
