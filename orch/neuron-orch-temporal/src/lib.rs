@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use client::{MockTemporalClient, TemporalClient, TemporalError};
 use layer0::effect::SignalPayload;
 use layer0::error::OrchError;
-use layer0::id::{AgentId, WorkflowId};
+use layer0::id::{OperatorId, WorkflowId};
 use layer0::operator::{Operator, OperatorInput, OperatorOutput};
 use layer0::orchestrator::{Orchestrator, QueryPayload};
 use serde_json::json;
@@ -52,11 +52,11 @@ use tokio::sync::RwLock;
 /// ```rust,no_run
 /// use neuron_orch_temporal::{TemporalConfig, TemporalOrch};
 /// use layer0::test_utils::EchoOperator;
-/// use layer0::id::AgentId;
+/// use layer0::id::OperatorId;
 /// use std::sync::Arc;
 ///
 /// let mut orch = TemporalOrch::new(TemporalConfig::default());
-/// orch.register(AgentId::new("echo"), Arc::new(EchoOperator));
+/// orch.register(OperatorId::new("echo"), Arc::new(EchoOperator));
 /// ```
 pub struct TemporalOrch {
     client: Arc<dyn TemporalClient>,
@@ -110,9 +110,9 @@ impl TemporalOrch {
 
     /// Register an operator under the given agent ID.
     ///
-    /// After registration, `dispatch(&agent_id, …)` will route to `op`.
+    /// After registration, `dispatch(&operator_id, …)` will route to `op`.
     /// Registering the same ID twice replaces the previous operator.
-    pub fn register(&mut self, id: AgentId, op: Arc<dyn Operator>) {
+    pub fn register(&mut self, id: OperatorId, op: Arc<dyn Operator>) {
         self.agents
             .lock()
             .expect("agents mutex poisoned")
@@ -131,7 +131,7 @@ impl TemporalOrch {
 impl Orchestrator for TemporalOrch {
     async fn dispatch(
         &self,
-        agent: &AgentId,
+        operator: &OperatorId,
         input: OperatorInput,
     ) -> Result<OperatorOutput, OrchError> {
         // Serialise input for the client abstraction layer.
@@ -141,10 +141,10 @@ impl Orchestrator for TemporalOrch {
         // Dispatch through the client (mock or real).
         let result_bytes = self
             .client
-            .execute_activity(agent.as_str(), bytes)
+            .execute_activity(operator.as_str(), bytes)
             .await
             .map_err(|e| match e {
-                TemporalError::WorkflowNotFound(msg) => OrchError::AgentNotFound(msg),
+                TemporalError::WorkflowNotFound(msg) => OrchError::OperatorNotFound(msg),
                 other => OrchError::DispatchFailed(other.to_string()),
             })?;
 
@@ -155,13 +155,13 @@ impl Orchestrator for TemporalOrch {
 
     async fn dispatch_many(
         &self,
-        tasks: Vec<(AgentId, OperatorInput)>,
+        tasks: Vec<(OperatorId, OperatorInput)>,
     ) -> Vec<Result<OperatorOutput, OrchError>> {
         // Phase 1: sequential dispatch. Temporal handles true parallelism in
         // Phase 2 via child workflows / activity scheduling.
         let mut results = Vec::with_capacity(tasks.len());
-        for (agent_id, input) in tasks {
-            results.push(self.dispatch(&agent_id, input).await);
+        for (operator_id, input) in tasks {
+            results.push(self.dispatch(&operator_id, input).await);
         }
         results
     }

@@ -21,6 +21,7 @@ use layer0::effect::Scope;
 use layer0::error::StateError;
 use layer0::state::{MemoryLink, SearchOptions, SearchResult, StateStore, StoreOptions};
 use std::collections::{HashSet, VecDeque};
+use tracing::instrument;
 
 /// CozoDB-backed [`StateStore`] with graph and hybrid search support.
 ///
@@ -117,6 +118,7 @@ impl std::fmt::Debug for CozoStore {
 #[cfg(not(feature = "cozo"))]
 #[async_trait]
 impl StateStore for CozoStore {
+    #[instrument(skip_all, fields(scope = ?scope, key = %key))]
     async fn read(
         &self,
         scope: &Scope,
@@ -134,6 +136,7 @@ impl StateStore for CozoStore {
         }
     }
 
+    #[instrument(skip_all, fields(scope = ?scope, key = %key))]
     async fn write(
         &self,
         scope: &Scope,
@@ -148,6 +151,7 @@ impl StateStore for CozoStore {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(scope = ?scope, key = %key))]
     async fn delete(&self, scope: &Scope, key: &str) -> Result<(), StateError> {
         let ck = composite_key(scope, key);
         let mut inner = self.engine.inner.write().await;
@@ -155,6 +159,7 @@ impl StateStore for CozoStore {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(scope = ?scope))]
     async fn list(&self, scope: &Scope, prefix: &str) -> Result<Vec<String>, StateError> {
         let scope_pfx = scope_prefix(scope);
         let inner = self.engine.inner.read().await;
@@ -181,6 +186,7 @@ impl StateStore for CozoStore {
     /// name and the value receive a score of `1.0`; single-field matches
     /// receive `0.5`. The full hybrid retrieval pipeline (HNSW + BM25 +
     /// Datalog graph expansion) is planned for v2.
+    #[instrument(skip_all, fields(scope = ?scope))]
     async fn search(
         &self,
         scope: &Scope,
@@ -381,6 +387,7 @@ fn dv_as_string(dv: &DataValue) -> Option<String> {
 #[cfg(feature = "cozo")]
 #[async_trait]
 impl StateStore for CozoStore {
+    #[instrument(skip_all, fields(scope = ?scope, key = %key))]
     async fn read(
         &self,
         scope: &Scope,
@@ -408,6 +415,7 @@ impl StateStore for CozoStore {
         }
     }
 
+    #[instrument(skip_all, fields(scope = ?scope, key = %key))]
     async fn write(
         &self,
         scope: &Scope,
@@ -436,6 +444,7 @@ impl StateStore for CozoStore {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(scope = ?scope, key = %key))]
     async fn delete(&self, scope: &Scope, key: &str) -> Result<(), StateError> {
         let sp = scope_prefix(scope);
         let params = cozo_params! {
@@ -451,6 +460,7 @@ impl StateStore for CozoStore {
         Ok(())
     }
 
+    #[instrument(skip_all, fields(scope = ?scope))]
     async fn list(&self, scope: &Scope, prefix: &str) -> Result<Vec<String>, StateError> {
         let sp = scope_prefix(scope);
         let params = cozo_params! {
@@ -481,6 +491,7 @@ impl StateStore for CozoStore {
     /// Results are sorted by score (descending). Keys that match both the key
     /// name and the value receive a score of `1.0`; single-field matches
     /// receive `0.5`.
+    #[instrument(skip_all, fields(scope = ?scope))]
     async fn search(
         &self,
         scope: &Scope,

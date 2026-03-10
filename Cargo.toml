@@ -2,7 +2,9 @@
 resolver = "3"
 members = [
   "op/neuron-op-sweep",
+  "op/neuron-op-sweep-v2",
   "orch/neuron-orch-sweep",
+  "orch/neuron-orch-kit",
   "orch/neuron-orch-temporal",
   "state/neuron-state-sqlite",
   "state/neuron-state-cozo",
@@ -11,6 +13,8 @@ members = [
   "auth/neuron-auth-pi",
   "auth/neuron-auth-omp",
   "client/neuron-client-parallel",
+  "bin/sweep-runner",
+  "bin/golden-sweep-v3",
 ]
 
 [workspace.package]

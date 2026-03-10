@@ -11,19 +11,22 @@ use std::time::Duration;
 use async_trait::async_trait;
 use layer0::effect::Scope;
 use layer0::error::StateError;
+use layer0::operator::TriggerType;
 use layer0::state::{SearchResult, StateStore, StoreOptions};
 use neuron_effects_git::{PrAction, route_verdict};
-use layer0::id::AgentId;
+use layer0::id::OperatorId;
 use layer0::test_utils::LocalOrchestrator;
 use neuron_op_sweep::{
-    CompareOperator, EvidenceItem, EvidenceStance, ProcessorTier, ResearchResult,
-    SweepOperatorConfig, SweepVerdict, VerdictStatus, run_sweep,
+    CompareOperator, CompareConfig, EvidenceItem, EvidenceStance, ProcessorTier, ResearchResult,
+    SweepVerdict, VerdictStatus, CompareInput,
 };
+use neuron_orch_kit::{dispatch_typed, ScopedStateView};
 use neuron_orch_sweep::{
     BudgetConfig, BudgetState, CycleReport, OrchestratorConfig, QueuedDecision, run_cycle,
 };
+use neuron_turn::infer::{InferRequest, InferResponse};
 use neuron_turn::provider::{Provider, ProviderError};
-use neuron_turn::types::{ContentPart, ProviderRequest, ProviderResponse, StopReason, TokenUsage};
+use neuron_turn::types::{StopReason, TokenUsage};
 use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -89,23 +92,19 @@ fn test_research_result() -> ResearchResult {
 struct TestLlm;
 
 impl Provider for TestLlm {
-    fn complete(
+    fn infer(
         &self,
-        req: ProviderRequest,
-    ) -> impl std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send {
+        req: InferRequest,
+    ) -> impl std::future::Future<Output = Result<InferResponse, ProviderError>> + Send {
         // CompareOperator formats: "Decision ID: {id}\n\n<research>..."
         let decision_id = req
             .messages
             .first()
-            .and_then(|m| m.content.first())
-            .and_then(|c| {
-                if let ContentPart::Text { text } = c {
-                    text.strip_prefix("Decision ID: ")
-                        .and_then(|s| s.split('\n').next())
-                        .map(str::to_string)
-                } else {
-                    None
-                }
+            .map(|m| m.text_content())
+            .and_then(|text| {
+                text.strip_prefix("Decision ID: ")
+                    .and_then(|s| s.split('\n').next())
+                    .map(str::to_string)
             })
             .unwrap_or_default();
 
@@ -129,17 +128,22 @@ impl Provider for TestLlm {
             swept_at: chrono::Utc::now().to_rfc3339(),
             evidence: vec![EvidenceItem {
                 source_url: "https://example.com".into(),
+                title: String::new(),
                 summary: "Test evidence".into(),
                 stance: EvidenceStance::Supporting,
                 retrieved_at: chrono::Utc::now().to_rfc3339(),
             }],
             narrative: "Test narrative".into(),
             proposed_diff: None,
+            research_inputs: vec![],
+            query: String::new(),
+            query_angle: String::new(),
         };
         let json = serde_json::to_string(&verdict).expect("serialize verdict");
         async move {
-            Ok(ProviderResponse {
-                content: vec![ContentPart::Text { text: json }],
+            Ok(InferResponse {
+                content: layer0::content::Content::text(json),
+                tool_calls: vec![],
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
                 model: "mock".into(),
@@ -160,9 +164,9 @@ fn default_orch_config() -> OrchestratorConfig {
         sweep_config_path: "/tmp/sweep.md".into(),
         state_db_path: "/tmp/state.db".into(),
         budget: BudgetConfig::default(),
-        operator: SweepOperatorConfig {
+        operator: CompareConfig {
             min_sweep_interval: Duration::from_secs(0), // disable dedup for test
-            ..SweepOperatorConfig::default()
+            ..CompareConfig::default()
         },
     }
 }
@@ -202,25 +206,32 @@ async fn smoke_full_cycle_with_three_decisions() {
         },
     ];
 
-    // Build the operator closure using run_sweep + Orchestrator (idiomatic pipeline).
+    // Build the operator closure using dispatch_typed + Orchestrator (idiomatic pipeline).
     let store_clone = Arc::clone(&store);
     let operator =
         move |id: String,
-              prev: Option<VerdictStatus>|
+              _prev: Option<VerdictStatus>|
               -> Pin<Box<dyn std::future::Future<Output = SweepVerdict> + Send + 'static>> {
             let s = Arc::clone(&store_clone);
             Box::pin(async move {
                 let mut orch = LocalOrchestrator::new();
-                let compare_id = AgentId::new("compare");
-                let cfg = SweepOperatorConfig {
+                let compare_id = OperatorId::new("compare");
+                let cfg = CompareConfig {
                     min_sweep_interval: Duration::from_secs(0),
-                    ..SweepOperatorConfig::default()
+                    ..CompareConfig::default()
                 };
-                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, Arc::clone(&s) as Arc<dyn StateStore>, cfg)));
-                let results = vec![test_research_result()];
-                run_sweep(&orch, &compare_id, &id, &results, prev, 8.0, 10.0, s.as_ref())
-                    .await
-                    .unwrap_or_else(|e| panic!("operator failed for {id}: {e}"))
+                let scoped = Arc::new(ScopedStateView::new(Arc::clone(&s) as Arc<dyn StateStore>, Scope::Custom("sweep".into())));
+                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, scoped, cfg)));
+                let input = CompareInput {
+                    research_results: vec![test_research_result()],
+                    decision_id: id.clone(),
+                    query: None,
+                    query_angle: None,
+                };
+                let (verdict, _) = dispatch_typed::<CompareInput, SweepVerdict>(
+                    &orch, &compare_id, input, TriggerType::Task,
+                ).await.unwrap_or_else(|e| panic!("operator failed for {id}: {e}"));
+                verdict
             })
         };
 
@@ -266,7 +277,7 @@ async fn smoke_full_cycle_with_three_decisions() {
         }
     }
 
-    // Note: The idiomatic pipeline (run_sweep + LocalOrchestrator) returns
+    // Note: The idiomatic pipeline (dispatch_typed + LocalOrchestrator) returns
     // WriteMemory effects in OperatorOutput but does NOT execute them —
     // effect interpretation is an orchestrator concern. The RecordingStore
     // receives no writes. Effect execution is tested separately via
@@ -303,18 +314,25 @@ async fn smoke_budget_exhaustion_stops_cycle() {
     let store_clone = Arc::clone(&store);
     let operator =
         move |id: String,
-              prev: Option<VerdictStatus>|
+              _prev: Option<VerdictStatus>|
               -> Pin<Box<dyn std::future::Future<Output = SweepVerdict> + Send + 'static>> {
             let s = Arc::clone(&store_clone);
             Box::pin(async move {
                 let mut orch = LocalOrchestrator::new();
-                let compare_id = AgentId::new("compare");
-                let cfg = SweepOperatorConfig::default();
-                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, Arc::clone(&s) as Arc<dyn StateStore>, cfg)));
-                let results = vec![test_research_result()];
-                run_sweep(&orch, &compare_id, &id, &results, prev, 0.004, 0.10, s.as_ref())
-                    .await
-                    .unwrap_or_else(|e| panic!("operator failed: {e}"))
+                let compare_id = OperatorId::new("compare");
+                let cfg = CompareConfig::default();
+                let scoped = Arc::new(ScopedStateView::new(Arc::clone(&s) as Arc<dyn StateStore>, Scope::Custom("sweep".into())));
+                orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, scoped, cfg)));
+                let input = CompareInput {
+                    research_results: vec![test_research_result()],
+                    decision_id: id.clone(),
+                    query: None,
+                    query_angle: None,
+                };
+                let (verdict, _) = dispatch_typed::<CompareInput, SweepVerdict>(
+                    &orch, &compare_id, input, TriggerType::Task,
+                ).await.unwrap_or_else(|e| panic!("operator failed: {e}"));
+                verdict
             })
         };
 

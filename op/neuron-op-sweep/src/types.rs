@@ -35,11 +35,15 @@ pub enum EvidenceStance {
 pub struct EvidenceItem {
     /// Source URL (research report, paper, repository, or blog post).
     pub source_url: String,
+    /// Short title of the source (may be omitted by LLM).
+    #[serde(default)]
+    pub title: String,
     /// One-line summary of what this source says.
     pub summary: String,
     /// Whether this source supports, contradicts, or is neutral toward the decision.
     pub stance: EvidenceStance,
     /// RFC 3339 timestamp of when this source was retrieved.
+    #[serde(default)]
     pub retrieved_at: String,
 }
 
@@ -47,14 +51,18 @@ pub struct EvidenceItem {
 ///
 /// Higher tiers use more capable (and more expensive) models.
 /// The operator selects the tier based on budget and previous verdict.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessorTier {
     /// Lowest cost. Used for routine sweeps when budget is below 80%.
+    #[serde(alias = "Base")]
     Base,
     /// Mid-tier. Used for refined decisions and budget-constrained challenged decisions.
+    #[serde(alias = "Core")]
     Core,
     /// Highest capability. Used for challenged decisions when budget allows.
+    #[default]
+    #[serde(alias = "Ultra")]
     Ultra,
 }
 
@@ -89,6 +97,15 @@ pub struct SweepVerdict {
     ///
     /// Contains a unified diff or structured edit instructions.
     pub proposed_diff: Option<String>,
+    /// Raw research results from Parallel.ai preserved for citation traceability.
+    #[serde(default)]
+    pub research_inputs: Vec<crate::provider::ResearchResult>,
+    /// The search query sent to Parallel.ai for this sweep.
+    #[serde(default)]
+    pub query: String,
+    /// Which facet/angle this query covers (e.g. "scalability", "security").
+    #[serde(default)]
+    pub query_angle: String,
 }
 
 /// Lightweight sweep metadata stored after each run for deduplication.
@@ -100,6 +117,15 @@ pub struct SweepMeta {
     pub verdict: VerdictStatus,
     /// Cost of the sweep run in USD.
     pub cost_usd: f64,
+    /// Search query used for this sweep.
+    #[serde(default)]
+    pub query: String,
+    /// Query angle/facet identifier.
+    #[serde(default)]
+    pub query_angle: String,
+    /// Processor tier used for research.
+    #[serde(default)]
+    pub processor: ProcessorTier,
 }
 
 #[cfg(test)]
@@ -148,12 +174,16 @@ mod tests {
             swept_at: "2026-03-04T18:00:00Z".to_string(),
             evidence: vec![EvidenceItem {
                 source_url: "https://example.com/paper".to_string(),
+                title: String::new(),
                 summary: "Confirms the approach".to_string(),
                 stance: EvidenceStance::Supporting,
                 retrieved_at: "2026-03-04T17:55:00Z".to_string(),
             }],
             narrative: "The decision is well-supported by current evidence.".to_string(),
             proposed_diff: None,
+            research_inputs: vec![],
+            query: String::new(),
+            query_angle: String::new(),
         };
 
         let json = serde_json::to_string(&verdict).expect("serialize");
@@ -175,6 +205,7 @@ mod tests {
     fn evidence_item_serde_round_trip() {
         let item = EvidenceItem {
             source_url: "https://example.com".to_string(),
+            title: String::new(),
             summary: "Supports claim X".to_string(),
             stance: EvidenceStance::Contradicting,
             retrieved_at: "2026-03-04T00:00:00Z".to_string(),
@@ -200,6 +231,9 @@ mod tests {
             evidence: vec![],
             narrative: "Minor update needed.".to_string(),
             proposed_diff: Some("--- a/decisions/topic-1a.md\n+++ b/decisions/topic-1a.md".to_string()),
+            research_inputs: vec![],
+            query: String::new(),
+            query_angle: String::new(),
         };
         let json = serde_json::to_string(&verdict).unwrap();
         let back: SweepVerdict = serde_json::from_str(&json).unwrap();

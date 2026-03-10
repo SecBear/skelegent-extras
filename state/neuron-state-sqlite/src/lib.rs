@@ -35,6 +35,7 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 use std::sync::Mutex;
 
+use tracing::instrument;
 /// SQLite-backed state store with FTS5 full-text search.
 ///
 /// Thread-safe via interior `Mutex<Connection>`. All async operations
@@ -124,6 +125,7 @@ unsafe impl Sync for SqliteStore {}
 
 #[async_trait]
 impl StateStore for SqliteStore {
+    #[instrument(skip_all, fields(scope = ?scope, key = %key))]
     async fn read(
         &self,
         scope: &Scope,
@@ -153,6 +155,7 @@ impl StateStore for SqliteStore {
         })
     }
 
+    #[instrument(skip_all, fields(scope = ?scope, key = %key))]
     async fn write(
         &self,
         scope: &Scope,
@@ -177,6 +180,7 @@ impl StateStore for SqliteStore {
         })
     }
 
+    #[instrument(skip_all, fields(scope = ?scope, key = %key))]
     async fn delete(&self, scope: &Scope, key: &str) -> Result<(), StateError> {
         let s = scope_str(scope);
         let k = key.to_string();
@@ -189,6 +193,7 @@ impl StateStore for SqliteStore {
         })
     }
 
+    #[instrument(skip_all, fields(scope = ?scope))]
     async fn list(&self, scope: &Scope, prefix: &str) -> Result<Vec<String>, StateError> {
         let _ = self.expire_ttl();
 
@@ -202,6 +207,7 @@ impl StateStore for SqliteStore {
         })
     }
 
+    #[instrument(skip_all, fields(scope = ?scope))]
     async fn search(
         &self,
         scope: &Scope,
@@ -544,7 +550,7 @@ mod tests {
             "nested": {"array": [1, 2, 3]},
             "bool": true,
             "null": null,
-            "float": 3.14
+            "float": 1.234
         });
 
         s.write(&scope, "complex", complex.clone()).await.unwrap();

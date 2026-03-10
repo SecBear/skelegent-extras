@@ -5,7 +5,7 @@
 use layer0::content::Content;
 use layer0::effect::SignalPayload;
 use layer0::error::{OperatorError, OrchError};
-use layer0::id::{AgentId, WorkflowId};
+use layer0::id::{OperatorId, WorkflowId};
 use layer0::operator::{ExitReason, Operator, OperatorInput, OperatorOutput, TriggerType};
 use layer0::orchestrator::{Orchestrator, QueryPayload};
 use layer0::test_utils::EchoOperator;
@@ -75,10 +75,10 @@ fn retry_policy_serde_round_trip() {
 #[tokio::test]
 async fn dispatch_single_operator() {
     let mut orch = TemporalOrch::new(TemporalConfig::default());
-    orch.register(AgentId::new("echo"), Arc::new(EchoOperator));
+    orch.register(OperatorId::new("echo"), Arc::new(EchoOperator));
 
     let output = orch
-        .dispatch(&AgentId::new("echo"), simple_input("hello"))
+        .dispatch(&OperatorId::new("echo"), simple_input("hello"))
         .await
         .expect("dispatch should succeed");
 
@@ -91,26 +91,26 @@ async fn dispatch_unknown_agent_returns_error() {
     let orch = TemporalOrch::new(TemporalConfig::default());
 
     let err = orch
-        .dispatch(&AgentId::new("ghost"), simple_input("x"))
+        .dispatch(&OperatorId::new("ghost"), simple_input("x"))
         .await
         .expect_err("unregistered agent must return an error");
 
     assert!(
-        err.to_string().contains("agent not found"),
-        "expected 'agent not found' in error, got: {err}"
+        err.to_string().contains("operator not found"),
+        "expected 'operator not found' in error, got: {err}"
     );
-    assert!(matches!(err, OrchError::AgentNotFound(_)));
+    assert!(matches!(err, OrchError::OperatorNotFound(_)));
 }
 
 #[tokio::test]
 async fn dispatch_many_all_succeed() {
     let mut orch = TemporalOrch::new(TemporalConfig::default());
-    orch.register(AgentId::new("a"), Arc::new(EchoOperator));
-    orch.register(AgentId::new("b"), Arc::new(EchoOperator));
+    orch.register(OperatorId::new("a"), Arc::new(EchoOperator));
+    orch.register(OperatorId::new("b"), Arc::new(EchoOperator));
 
     let tasks = vec![
-        (AgentId::new("a"), simple_input("msg-a")),
-        (AgentId::new("b"), simple_input("msg-b")),
+        (OperatorId::new("a"), simple_input("msg-a")),
+        (OperatorId::new("b"), simple_input("msg-b")),
     ];
     let results = orch.dispatch_many(tasks).await;
 
@@ -128,12 +128,12 @@ async fn dispatch_many_all_succeed() {
 #[tokio::test]
 async fn dispatch_many_partial_failure() {
     let mut orch = TemporalOrch::new(TemporalConfig::default());
-    orch.register(AgentId::new("ok"), Arc::new(EchoOperator));
+    orch.register(OperatorId::new("ok"), Arc::new(EchoOperator));
     // "bad" is intentionally not registered.
 
     let tasks = vec![
-        (AgentId::new("ok"), simple_input("fine")),
-        (AgentId::new("bad"), simple_input("boom")),
+        (OperatorId::new("ok"), simple_input("fine")),
+        (OperatorId::new("bad"), simple_input("boom")),
     ];
     let results = orch.dispatch_many(tasks).await;
 
@@ -142,7 +142,7 @@ async fn dispatch_many_partial_failure() {
     assert!(results[1].is_err(), "unknown agent should fail");
     assert!(matches!(
         results[1].as_ref().unwrap_err(),
-        OrchError::AgentNotFound(_)
+        OrchError::OperatorNotFound(_)
     ));
 }
 
@@ -160,10 +160,10 @@ impl Operator for AlwaysFailOperator {
 #[tokio::test]
 async fn dispatch_propagates_operator_failure() {
     let mut orch = TemporalOrch::new(TemporalConfig::default());
-    orch.register(AgentId::new("fail"), Arc::new(AlwaysFailOperator));
+    orch.register(OperatorId::new("fail"), Arc::new(AlwaysFailOperator));
 
     let err = orch
-        .dispatch(&AgentId::new("fail"), simple_input("trigger"))
+        .dispatch(&OperatorId::new("fail"), simple_input("trigger"))
         .await
         .expect_err("failing operator must propagate an error");
 

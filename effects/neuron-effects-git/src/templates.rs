@@ -230,6 +230,7 @@ mod tests {
             swept_at: "2026-03-04T18:00:00Z".to_string(),
             evidence: vec![EvidenceItem {
                 source_url: "https://example.com/paper".to_string(),
+                title: String::new(),
                 summary: "Confirms the approach".to_string(),
                 stance: EvidenceStance::Supporting,
                 retrieved_at: "2026-03-04T17:55:00Z".to_string(),
@@ -237,6 +238,9 @@ mod tests {
             narrative: "Durable execution patterns remain valid.\nSee supporting evidence."
                 .to_string(),
             proposed_diff: None,
+            research_inputs: vec![],
+            query: String::new(),
+            query_angle: String::new(),
         }
     }
 
