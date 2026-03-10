@@ -70,7 +70,7 @@ impl ProcessorTier {
 /// Structured verdict produced by [`CompareOperator`](crate::CompareOperator).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SweepVerdict {
-    /// Decision identifier (e.g. "D1", "C3").
+    /// Decision identifier (e.g. "trigger", "communication").
     pub decision_id: String,
     /// Verdict outcome.
     pub status: VerdictStatus,
