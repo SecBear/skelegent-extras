@@ -46,6 +46,8 @@
 //!
 //! [`StateStore`]: layer0::state::StateStore
 
+pub mod search;
+
 pub mod engine;
 pub mod schema;
 pub mod scope;

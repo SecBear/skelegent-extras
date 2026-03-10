@@ -163,6 +163,21 @@ impl CozoStore {
             "HNSW requires cozo feature".to_string(),
         ))
     }
+
+    /// Hybrid search combining FTS and HNSW vector search with RRF fusion.
+    ///
+    /// The HashMap backend does not support hybrid search. Returns [`StateError::WriteFailed`].
+    pub async fn hybrid_search(
+        &self,
+        _scope: &Scope,
+        _query_text: &str,
+        _query_vector: &[f32],
+        _limit: usize,
+    ) -> Result<Vec<SearchResult>, StateError> {
+        Err(StateError::WriteFailed(
+            "hybrid search requires cozo feature".to_string(),
+        ))
+    }
 }
 
 /// Helper: build a `BTreeMap<String, DataValue>` from key-value pairs.
@@ -269,6 +284,28 @@ impl CozoStore {
             })
             .collect();
         Ok(results)
+    }
+
+    /// Hybrid search combining FTS and HNSW vector search with RRF fusion.
+    ///
+    /// Runs FTS text search and HNSW vector search, then fuses results using
+    /// Reciprocal Rank Fusion.
+    pub async fn hybrid_search(
+        &self,
+        scope: &Scope,
+        query_text: &str,
+        query_vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, StateError> {
+        use layer0::state::StateStore as _;
+        let fts_results = self.search(scope, query_text, limit).await?;
+        let vector_results = self.vector_search(scope, query_vector, limit).await?;
+        let mut fused = crate::search::rrf_fuse(
+            &[fts_results, vector_results],
+            crate::search::RRF_K,
+        );
+        fused.truncate(limit);
+        Ok(fused)
     }
 }
 
