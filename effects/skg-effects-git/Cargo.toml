@@ -1,0 +1,22 @@
+[package]
+name = "skg-effects-git"
+version = "0.4.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Git/GitHub effect module — translates sweep verdicts into PRs, commits, and digests"
+
+[dependencies]
+skg-op-sweep = { path = "../../op/skg-op-sweep", version = "0.4.0" }
+skg-state-sqlite = { path = "../../state/skg-state-sqlite", version = "0.4.0" }
+async-trait = "0.1"
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+regex = "1"
+reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

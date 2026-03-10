@@ -1,0 +1,28 @@
+[package]
+name = "skg-orch-sweep"
+version = "0.4.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Sweep orchestrator for skelegent — priority scheduling, budget enforcement, and cycle management"
+
+[dependencies]
+layer0 = { path = "../../../skelegent/layer0", version = "0.4.0" }
+skg-op-sweep = { path = "../../op/skg-op-sweep", version = "0.4.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+chrono = "0.4"
+thiserror = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+skg-state-sqlite = { path = "../../state/skg-state-sqlite", version = "0.4.0" }
+skg-state-memory = { path = "../../../skelegent/state/skg-state-memory", version = "0.4.0" }
+skg-effects-git = { path = "../../effects/skg-effects-git", version = "0.4.0" }
+
+skg-turn = { path = "../../../skelegent/turn/skg-turn", version = "0.4.0" }
+layer0 = { path = "../../../skelegent/layer0", version = "0.4.0", features = ["test-utils"] }
+skg-orch-kit = { path = "../skg-orch-kit", version = "0.1.0" }

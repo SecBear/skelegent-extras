@@ -1,4 +1,4 @@
-# neuron-extras — provider ecosystem for neuron
+# skelegent-extras — provider ecosystem for skelegent
 
 ## Stability Notice
 
@@ -6,17 +6,17 @@
 
 ## What This Is
 
-Provider ecosystem for [neuron](https://github.com/secbear/neuron). Heavy-dependency implementations that don't belong in neuron core — each crate wraps one external system behind a neuron trait. Uses a terraform-provider-style model: one concern per crate, opt-in via Cargo features.
+Provider ecosystem for [skelegent](https://github.com/secbear/skelegent). Heavy-dependency implementations that don't belong in skelegent core — each crate wraps one external system behind a skelegent trait. Uses a terraform-provider-style model: one concern per crate, opt-in via Cargo features.
 
 ## Crate Map
 
 | Directory | Crate(s) | Purpose |
 |-----------|----------|---------|
-| `op/` | `neuron-op-sweep` | Sweep operators |
-| `orch/` | `neuron-orch-sweep`, `neuron-orch-temporal` | Orchestration backends |
-| `state/` | `neuron-state-sqlite`, `neuron-state-cozo` | State-store implementations |
-| `effects/` | `neuron-effects-git` | Git effect executor |
-| `auth/` | `neuron-auth-oauth`, `neuron-auth-pi`, `neuron-auth-omp` | Auth providers |
+| `op/` | `skg-op-sweep` | Sweep operators |
+| `orch/` | `skg-orch-sweep`, `skg-orch-temporal` | Orchestration backends |
+| `state/` | `skg-state-sqlite`, `skg-state-cozo` | State-store implementations |
+| `effects/` | `skg-effects-git` | Git effect executor |
+| `auth/` | `skg-auth-oauth`, `skg-auth-pi`, `skg-auth-omp` | Auth providers |
 
 ## Build
 

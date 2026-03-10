@@ -1,5 +1,5 @@
 {
-  description = "neuron-extras — provider ecosystem crates for neuron";
+  description = "skelegent-extras — provider ecosystem crates for skelegent";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -92,7 +92,7 @@
             inherit (commonEnv) OPENSSL_NO_VENDOR RUST_SRC_PATH;
 
             shellHook = ''
-              echo "neuron-extras dev shell"
+              echo "skelegent-extras dev shell"
               echo ""
               echo "  rustc --version   — $(rustc --version)"
               echo "  cargo test        — run all tests"
@@ -117,7 +117,7 @@
             CXX = "${pkgs.clang}/bin/clang++";
 
             shellHook = ''
-              echo "neuron-extras FULL dev shell (native deps for optional features)"
+              echo "skelegent-extras FULL dev shell (native deps for optional features)"
               echo ""
               echo "  Extra: cmake, clang, protobuf"
               echo "  Enables: --features rocksdb, --features temporal-sdk"

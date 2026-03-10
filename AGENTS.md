@@ -1,8 +1,8 @@
 # Extras — Provider Ecosystem
 
-Provider ecosystem for [neuron](../neuron/). Heavy-dependency implementations
-that don't belong in neuron core, shipped as a separate repo (terraform provider
-model). Each crate wraps one external system behind a neuron trait.
+Provider ecosystem for [skelegent](../skelegent/). Heavy-dependency implementations
+that don't belong in skelegent core, shipped as a separate repo (terraform provider
+model). Each crate wraps one external system behind a skelegent trait.
 
 ## Crate Layout
 
@@ -12,7 +12,7 @@ model). Each crate wraps one external system behind a neuron trait.
 | `orch/`   | `sweep`, `temporal` | Orchestration backends          |
 | `state/`  | `sqlite`, `cozo`    | State-store implementations     |
 | `effects/`| `git`          | Git effects                          |
-| `auth/`   | `neuron-auth-oauth`, `neuron-auth-pi`, `neuron-auth-omp` | Auth providers (OAuth Device Flow, pi OAuth, OMP SQLite) |
+| `auth/`   | `skg-auth-oauth`, `skg-auth-pi`, `skg-auth-omp` | Auth providers (OAuth Device Flow, pi OAuth, OMP SQLite) |
 
 ## Build Commands
 
@@ -38,14 +38,14 @@ Default features require **no** native dependencies.
 
 ## Quality Gates
 
-Same bar as neuron:
+Same bar as skelegent:
 - `#![deny(missing_docs)]` on every crate
 - Edition 2024
 - All public types derive `Debug`, `Clone`, `Serialize`, `Deserialize`
 
 ## Dependencies
 
-Path-depends on neuron core crates during development (`path = "../neuron/..."`).
+Path-depends on skelegent core crates during development (`path = "../skelegent/..."`).
 Published versions will use crates.io deps with compatible semver ranges.
 
 ## Golden Constraint

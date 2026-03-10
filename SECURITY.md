@@ -12,7 +12,7 @@
 **Do not report security vulnerabilities through public GitHub issues.**
 
 Instead, please report via
-[GitHub Security Advisories](https://github.com/secbear/neuron-extras/security/advisories/new)
+[GitHub Security Advisories](https://github.com/secbear/skelegent-extras/security/advisories/new)
 with:
 
 - Description of the vulnerability
@@ -25,4 +25,4 @@ understand and address the issue before any public disclosure.
 
 ## Scope
 
-This policy covers all published crates in the neuron-extras workspace.
+This policy covers all published crates in the skelegent-extras workspace.

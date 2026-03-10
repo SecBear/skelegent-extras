@@ -1,0 +1,21 @@
+[package]
+name = "skg-orch-kit"
+version = "0.1.0"
+description = "Composition utilities for skelegent orchestration — scoped state, typed dispatch, budget tracking, tracing, and effect middleware."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+layer0 = { path = "../../../skelegent/layer0", version = "0.4.0" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+layer0 = { path = "../../../skelegent/layer0", features = ["test-utils"], version = "0.4.0" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

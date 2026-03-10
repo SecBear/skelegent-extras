@@ -1,12 +1,12 @@
 ---
 name: Bug Report
-about: Report a bug in neuron-extras
+about: Report a bug in skelegent-extras
 labels: bug
 ---
 
 ## Crate
 
-Which crate is affected? (e.g., neuron-auth-pi, neuron-op-sweep, neuron-orch-sweep)
+Which crate is affected? (e.g., skg-auth-pi, skg-op-sweep, skg-orch-sweep)
 
 ## Version
 

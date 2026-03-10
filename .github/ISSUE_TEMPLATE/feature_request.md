@@ -1,6 +1,6 @@
 ---
 name: Feature Request
-about: Suggest a new feature for neuron-extras
+about: Suggest a new feature for skelegent-extras
 labels: enhancement
 ---
 
@@ -22,4 +22,4 @@ What other approaches did you consider?
 
 ## Which Crate?
 
-Where should this live? (e.g., neuron-auth-pi, neuron-op-sweep, new crate)
+Where should this live? (e.g., skg-auth-pi, skg-op-sweep, new crate)
