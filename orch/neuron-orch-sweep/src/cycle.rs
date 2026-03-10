@@ -30,7 +30,7 @@ use crate::priority::QueuedDecision;
 pub struct OrchestratorConfig {
     /// How often to trigger a sweep cycle. Default: 4 hours.
     pub cycle_interval: Duration,
-    /// Path to the sweep-config file in the golden repository.
+    /// Path to the sweep-config file in the configuration repository.
     pub sweep_config_path: PathBuf,
     /// Path to the `neuron-state-sqlite` database used for budget persistence.
     pub state_db_path: PathBuf,

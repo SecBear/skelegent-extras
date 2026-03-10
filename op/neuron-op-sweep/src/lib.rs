@@ -54,5 +54,5 @@ pub use provider::*;
 pub use synthesis::*;
 pub use synthesis_operator::{SynthesisInput, SynthesisOperator};
 pub use types::*;
-pub use queries::{DecisionQuery, next_query, queries_for};
+pub use queries::{build_query, DecisionQuery, next_query, queries_for};
 pub use research_operator::ResearchOperator;

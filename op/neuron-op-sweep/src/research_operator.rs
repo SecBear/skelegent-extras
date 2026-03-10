@@ -1,8 +1,7 @@
 //! Research operator — gathers evidence for a single decision.
 //!
 //! [`ResearchOperator`] is generic over [`ResearchSource`], keeping the sweep
-//! pipeline decoupled from any concrete HTTP client. The golden sweep runner
-//! provides an adapter that wraps `ParallelClient`.
+//! pipeline decoupled from any concrete HTTP client. Implementations live
 //!
 //! # Architecture
 //!
@@ -149,7 +148,7 @@ mod tests {
 
     fn make_input(mode: ResearchMode) -> OperatorInput {
         let req = ResearchInput {
-            decision_id: "D1".to_string(),
+            decision_id: "test-decision".to_string(),
             query: "test query".to_string(),
             query_angle: "event-model".to_string(),
             mode,

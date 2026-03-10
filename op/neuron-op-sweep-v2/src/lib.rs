@@ -28,6 +28,6 @@ pub mod synthesis_operator;
 pub use compare::{CompareConfig, CompareOperator};
 pub use cost::SweepCostTracker;
 pub use provider::{CompareInput, ResearchInput, ResearchMode, ResearchResult, ResearchSource, SweepError};
-pub use queries::{DecisionQuery, next_query, queries_for};
+pub use queries::{build_query, DecisionQuery, next_query, queries_for};
 pub use research_operator::ResearchOperator;
 pub use types::*;

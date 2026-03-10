@@ -2,8 +2,7 @@
 //!
 //! [`ResearchResult`] and [`SweepError`] are the core types used by the sweep
 //! pipeline. [`ResearchSource`] is the trait that research operators use to
-//! obtain evidence — implementations live in consumer crates (e.g. the golden
-//! sweep runner wraps `ParallelClient`).
+//! obtain evidence — implementations live in consumer crates.
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use async_trait::async_trait;

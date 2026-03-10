@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 /// |---|---|
 /// | `{min_flag_confidence}` | [`SynthesisConfig::min_flag_confidence`] |
 pub const PASS_1_SYSTEM_PROMPT: &str =
-    "You are analyzing the Golden architectural decision framework after a full \
+    "You are analyzing the architectural decision framework after a full \
 sweep cycle. You have all 23 decision cards and their latest deltas.
 
 For each decision, you see:

@@ -1,7 +1,7 @@
 //! Research operator — gathers evidence for a single decision.
 //!
 //! [`ResearchOperator`] is generic over [`ResearchSource`], keeping the sweep
-//! pipeline decoupled from any concrete HTTP client. The golden sweep runner
+//! pipeline decoupled from any concrete HTTP client. The sweep runner binary
 //! provides an adapter that wraps `ParallelClient`.
 //!
 //! # Architecture
