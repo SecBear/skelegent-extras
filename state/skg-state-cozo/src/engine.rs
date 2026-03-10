@@ -243,7 +243,7 @@ impl CozoEngine {
         // CozoDB requires each :create command in its own run_script call.
         for ddl in [
             crate::schema::KV_DDL,
-            crate::schema::NODE_DDL,
+            crate::schema::NODE_V2_DDL,
             crate::schema::EDGE_DDL,
         ] {
             self.db
@@ -255,6 +255,14 @@ impl CozoEngine {
         self.db
             .run_script(
                 crate::schema::KV_FTS_DDL,
+                Default::default(),
+                cozo::ScriptMutability::Mutable,
+            )
+            .map_err(|e| CozoError::Database(format!("{e:?}")))?;
+        // HNSW index DDL must also be a separate run_script call.
+        self.db
+            .run_script(
+                crate::schema::NODE_HNSW_DDL,
                 Default::default(),
                 cozo::ScriptMutability::Mutable,
             )

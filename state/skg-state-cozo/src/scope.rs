@@ -88,12 +88,14 @@ mod tests {
         assert_eq!(scope_prefix(&s), "custom:research/topicX");
     }
 
+    #[cfg(not(feature = "cozo"))]
     #[test]
     fn composite_key_uses_null_separator() {
         let ck = composite_key(&Scope::Global, "some:key");
         assert_eq!(ck, "global\0some:key");
     }
 
+    #[cfg(not(feature = "cozo"))]
     #[test]
     fn extract_key_round_trips() {
         let scope = Scope::Session(SessionId::new("s1"));
@@ -102,6 +104,7 @@ mod tests {
         assert_eq!(extract_key(&ck, &pfx), Some("my:key"));
     }
 
+    #[cfg(not(feature = "cozo"))]
     #[test]
     fn extract_key_wrong_scope_returns_none() {
         let pfx_a = scope_prefix(&Scope::Global);

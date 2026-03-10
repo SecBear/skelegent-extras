@@ -113,6 +113,150 @@ impl std::fmt::Debug for CozoStore {
     }
 }
 
+// ── Tier 2: CozoStore-only methods ───────────────────────────────────────────
+
+/// Stub impl for the HashMap backend: vector operations are not supported.
+#[cfg(not(feature = "cozo"))]
+impl CozoStore {
+    /// Write a node with embedding vector (Tier 2 — CozoStore only).
+    ///
+    /// The HashMap backend does not support HNSW. Returns [`StateError::WriteFailed`].
+    pub async fn write_node(
+        &self,
+        _scope: &Scope,
+        _key: &str,
+        _data: serde_json::Value,
+        _node_type: &str,
+        _salience: f64,
+        _embedding: &[f32],
+    ) -> Result<(), StateError> {
+        Err(StateError::WriteFailed(
+            "HNSW requires cozo feature".to_string(),
+        ))
+    }
+
+    /// Vector similarity search using HNSW index (Tier 2 — CozoStore only).
+    ///
+    /// The HashMap backend does not support HNSW. Returns [`StateError::WriteFailed`].
+    pub async fn vector_search(
+        &self,
+        _scope: &Scope,
+        _query_vector: &[f32],
+        _limit: usize,
+    ) -> Result<Vec<SearchResult>, StateError> {
+        Err(StateError::WriteFailed(
+            "HNSW requires cozo feature".to_string(),
+        ))
+    }
+}
+
+/// Helper: build a `BTreeMap<String, DataValue>` from key-value pairs.
+#[cfg(feature = "cozo")]
+macro_rules! cozo_params {
+    ($($key:expr => $val:expr),* $(,)?) => {{
+        let mut m = BTreeMap::<String, DataValue>::new();
+        $( m.insert($key.to_string(), $val); )*
+        m
+    }};
+}
+
+/// Real HNSW impl for the CozoDB backend.
+#[cfg(feature = "cozo")]
+impl CozoStore {
+    /// Write a node with embedding vector (Tier 2 — CozoStore only).
+    ///
+    /// Stores data alongside a 1536-dimensional F32 embedding for HNSW
+    /// similarity search via [`CozoStore::vector_search`].
+    pub async fn write_node(
+        &self,
+        scope: &Scope,
+        key: &str,
+        data: serde_json::Value,
+        node_type: &str,
+        salience: f64,
+        embedding: &[f32],
+    ) -> Result<(), StateError> {
+        let sp = scope_prefix(scope);
+        let data_str = serde_json::to_string(&data)
+            .map_err(|e| StateError::Serialization(e.to_string()))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let emb_vec = DataValue::Vec(Vector::F32(ndarray::Array1::from_vec(
+            embedding.to_vec(),
+        )));
+        let params = cozo_params! {
+            "scope" => DataValue::Str(sp.into()),
+            "key" => DataValue::Str(key.to_string().into()),
+            "data" => DataValue::Str(data_str.into()),
+            "node_type" => DataValue::Str(node_type.to_string().into()),
+            "salience" => DataValue::from(salience),
+            "embedding" => emb_vec,
+            "now" => DataValue::from(now),
+        };
+        self.engine
+            .run_mutation(
+                "?[scope, key, data, node_type, salience, embedding, created_at] <- \
+                [[$scope, $key, $data, $node_type, $salience, $embedding, $now]] \
+                :put node {scope, key => data, node_type, salience, embedding, created_at}",
+                params,
+            )
+            .map_err(StateError::from)?;
+        Ok(())
+    }
+
+    /// Vector similarity search using HNSW index (Tier 2 — CozoStore only).
+    ///
+    /// Returns the `limit` nearest neighbors by cosine distance. Scoped to
+    /// `scope` — results from other scopes are excluded.
+    pub async fn vector_search(
+        &self,
+        scope: &Scope,
+        query_vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, StateError> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        let sp = scope_prefix(scope);
+        let query_dv = DataValue::Vec(Vector::F32(ndarray::Array1::from_vec(
+            query_vector.to_vec(),
+        )));
+        let params = cozo_params! {
+            "scope" => DataValue::Str(sp.into()),
+            "vec" => query_dv,
+            "limit" => DataValue::from(limit as i64),
+        };
+        let q = concat!(
+            "?[key, data, dist] := ",
+            "~node:emb_idx {scope, key, data | query: $vec, k: $limit, ef: 64, bind_distance: dist},",
+            " scope == $scope\n",
+            ":order dist\n",
+            ":limit $limit",
+        );
+        let rows = self
+            .engine
+            .run_query(q, params)
+            .map_err(StateError::from)?;
+        let results: Vec<SearchResult> = rows
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let key = dv_as_string(&row[0])?;
+                let data_str = dv_as_string(&row[1])?;
+                let dist = dv_as_f64(&row[2]).unwrap_or(1.0);
+                // Score: 1 − distance (cosine distance ∈ [0, 2]; 0 = identical).
+                let score = 1.0 - dist;
+                let mut sr = SearchResult::new(key, score);
+                sr.snippet = Some(data_str.chars().take(120).collect());
+                Some(sr)
+            })
+            .collect();
+        Ok(results)
+    }
+}
+
 // ── HashMap backend (default, no native deps) ─────────────────────────────────
 
 #[cfg(not(feature = "cozo"))]
@@ -363,17 +507,9 @@ impl StateStore for CozoStore {
 #[cfg(feature = "cozo")]
 use crate::engine::DataValue;
 #[cfg(feature = "cozo")]
-use std::collections::BTreeMap;
-
-/// Helper: build a `BTreeMap<String, DataValue>` from key-value pairs.
+use cozo::Vector;
 #[cfg(feature = "cozo")]
-macro_rules! cozo_params {
-    ($($key:expr => $val:expr),* $(,)?) => {{
-        let mut m = BTreeMap::<String, DataValue>::new();
-        $( m.insert($key.to_string(), $val); )*
-        m
-    }};
-}
+use std::collections::BTreeMap;
 
 /// Extract a `String` from a `DataValue`, returning `None` for non-string values.
 #[cfg(feature = "cozo")]
