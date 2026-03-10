@@ -183,6 +183,22 @@ async fn search_respects_limit() {
     assert!(results.len() <= 3, "result count must not exceed limit");
 }
 
+#[cfg(feature = "cozo")]
+#[tokio::test]
+async fn fts_search_returns_ranked_results() {
+    let store = CozoStore::memory().unwrap();
+    let scope = Scope::Global;
+    store.write(&scope, "doc1", json!("Rust is a systems programming language")).await.unwrap();
+    store.write(&scope, "doc2", json!("Python is great for data science")).await.unwrap();
+    store.write(&scope, "doc3", json!("Rust and memory safety go together")).await.unwrap();
+
+    let results = store.search(&scope, "Rust", 10).await.unwrap();
+    assert!(!results.is_empty(), "FTS should find results for 'Rust'");
+    let keys: Vec<&str> = results.iter().map(|r| r.key.as_str()).collect();
+    assert!(keys.contains(&"doc1"), "doc1 mentions Rust");
+    assert!(keys.contains(&"doc3"), "doc3 mentions Rust");
+}
+
 // ── graph: link / traverse ────────────────────────────────────────────────────
 
 #[tokio::test]

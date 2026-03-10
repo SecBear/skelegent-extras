@@ -250,6 +250,15 @@ impl CozoEngine {
                 .run_script(ddl, Default::default(), cozo::ScriptMutability::Mutable)
                 .map_err(|e| CozoError::Database(format!("{e:?}")))?;
         }
+        // FTS index DDL must be a separate run_script call — CozoDB rejects
+        // mixed :create / ::fts create scripts.
+        self.db
+            .run_script(
+                crate::schema::KV_FTS_DDL,
+                Default::default(),
+                cozo::ScriptMutability::Mutable,
+            )
+            .map_err(|e| CozoError::Database(format!("{e:?}")))?;
         Ok(())
     }
 

@@ -384,6 +384,12 @@ fn dv_as_string(dv: &DataValue) -> Option<String> {
     }
 }
 
+/// Extract an `f64` from a `DataValue::Num`, returning `None` for non-numeric values.
+#[cfg(feature = "cozo")]
+fn dv_as_f64(dv: &DataValue) -> Option<f64> {
+    dv.get_float()
+}
+
 #[cfg(feature = "cozo")]
 #[async_trait]
 impl StateStore for CozoStore {
@@ -485,12 +491,10 @@ impl StateStore for CozoStore {
         Ok(keys)
     }
 
-    /// Search for entries whose key or JSON-encoded value contains `query`
-    /// (case-insensitive substring match).
+    /// Search for entries whose value field matches the FTS query.
     ///
-    /// Results are sorted by score (descending). Keys that match both the key
-    /// name and the value receive a score of `1.0`; single-field matches
-    /// receive `0.5`.
+    /// Uses the `kv:fts_val` FTS index created at schema init time.
+    /// Results are returned ranked by BM25 score (descending).
     #[instrument(skip_all, fields(scope = ?scope))]
     async fn search(
         &self,
@@ -504,38 +508,29 @@ impl StateStore for CozoStore {
         let sp = scope_prefix(scope);
         let params = cozo_params! {
             "scope" => DataValue::Str(sp.into()),
+            "query" => DataValue::Str(query.to_string().into()),
+            "limit" => DataValue::from(limit as i64),
         };
+        let fts_q = concat!(
+            "?[key, score] := ",
+            "~kv:fts_val {scope, key | query: $query, k: $limit, bind_score: score},",
+            " scope == $scope\n",
+            ":order -score\n",
+            ":limit $limit",
+        );
         let rows = self
             .engine
-            .run_query("?[key, value] := *kv{scope: $scope, key, value}", params)
+            .run_query(fts_q, params)
             .map_err(StateError::from)?;
-
-        let query_lower = query.to_lowercase();
-        let mut results: Vec<SearchResult> = rows
+        let results: Vec<SearchResult> = rows
             .rows
             .iter()
             .filter_map(|row| {
                 let key = dv_as_string(&row[0])?;
-                let raw = dv_as_string(&row[1])?;
-                let key_hit = key.to_lowercase().contains(&query_lower);
-                let val_hit = raw.to_lowercase().contains(&query_lower);
-                if key_hit || val_hit {
-                    let score = if key_hit && val_hit { 1.0 } else { 0.5 };
-                    let mut sr = SearchResult::new(key, score);
-                    sr.snippet = Some(raw.chars().take(120).collect());
-                    Some(sr)
-                } else {
-                    None
-                }
+                let score = dv_as_f64(&row[1]).unwrap_or(0.5);
+                Some(SearchResult::new(key, score))
             })
             .collect();
-
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.truncate(limit);
         Ok(results)
     }
 
@@ -679,12 +674,12 @@ impl StateStore for CozoStore {
             };
 
             for row in &rows.rows {
-                if let Some(to_key) = dv_as_string(&row[0]) {
-                    if !visited.contains(&to_key) {
-                        visited.insert(to_key.clone());
-                        result.push(to_key.clone());
-                        queue.push_back((to_key, depth + 1));
-                    }
+                if let Some(to_key) = dv_as_string(&row[0])
+                    && !visited.contains(&to_key)
+                {
+                    visited.insert(to_key.clone());
+                    result.push(to_key.clone());
+                    queue.push_back((to_key, depth + 1));
                 }
             }
         }

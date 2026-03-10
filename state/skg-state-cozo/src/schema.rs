@@ -36,15 +36,33 @@ pub const NODE_DDL: &str = ":create node { scope: String, key: String => data: S
 /// `"supersedes"`). `metadata` is JSON-encoded edge properties.
 pub const EDGE_DDL: &str = ":create edge { scope: String, from_key: String, to_key: String, relation: String => metadata: String, created_at: Float }";
 
+/// FTS index on the kv relation's value field.
+///
+/// Uses Simple tokenizer with Lowercase filter for language-neutral text search.
+///
+/// # Note
+///
+/// This DDL **must** be executed as a separate [`run_script`] call from
+/// [`DDL_INIT`] — CozoDB processes `::fts create` (index DDL) differently
+/// from `:create` (relation DDL) and rejects mixed scripts.
+pub const KV_FTS_DDL: &str = r#"::fts create kv:fts_val {
+    extractor: value,
+    tokenizer: Simple,
+    filters: [Lowercase],
+}"#;
+
 /// Complete schema initialization script.
 ///
-/// Runs all three DDL statements as a single batch. In CozoDB, `:create` is
+/// Runs all three relation DDL statements as a single batch. In CozoDB, `:create` is
 /// idempotent — it creates the relation only if it does not exist. This script
 /// can be executed multiple times on the same database safely.
 ///
 /// This string is a verbatim concatenation of [`KV_DDL`], [`NODE_DDL`], and
 /// [`EDGE_DDL`], separated by newlines. When the `rocksdb` feature is enabled,
 /// pass this to `DbInstance::run_script` inside [`CozoEngine::ensure_schema`].
+///
+/// **Note:** [`KV_FTS_DDL`] is intentionally excluded — FTS index DDL must be
+/// run as a separate script call.
 pub const DDL_INIT: &str = "\
 :create kv { scope: String, key: String => value: String, created_at: Float }
 :create node { scope: String, key: String => data: String, node_type: String, salience: Float, created_at: Float }
