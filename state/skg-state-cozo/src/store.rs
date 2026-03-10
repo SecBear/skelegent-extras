@@ -1,10 +1,15 @@
 //! [`CozoStore`]: [`StateStore`] implementation backed by [`CozoEngine`].
 //!
-//! - `search` performs basic substring matching on keys and JSON-encoded values.
-//!   Full hybrid retrieval (HNSW + BM25 + Datalog graph expansion + RRF) is
-//!   planned for v2 when the `cozo` feature is fully activated.
-//! - Transient entries are routed to a dedicated `kv_transient` table (cozo)
-//!   or an in-memory `transient` HashMap (no-cozo backend).
+//! - `search` uses the `kv:fts_val` FTS index (BM25-ranked) on the `cozo` backend,
+//!   or case-insensitive substring matching on the HashMap backend.
+//! - `vector_search` queries the `node:emb_idx` HNSW index (cosine distance).
+//! - `hybrid_search` runs FTS and HNSW in parallel, then fuses results via
+//!   Reciprocal Rank Fusion (RRF).
+//! - Graph edges are stored in the `edge` relation; `traverse` implements
+//!   level-batched BFS using Datalog `is_in` predicates.
+//! - Transient entries are routed to a dedicated `kv_transient` relation (cozo)
+//!   or an in-memory `transient` HashMap (no-cozo backend), and purged by
+//!   [`CozoStore::clear_transient`] at turn boundaries.
 //! - `write_hinted` honours `Lifetime::Transient`; all other lifetimes fall
 //!   through to `write`.
 
@@ -389,8 +394,8 @@ impl StateStore for CozoStore {
     ///
     /// Results are sorted by score (descending). Keys that match both the key
     /// name and the value receive a score of `1.0`; single-field matches
-    /// receive `0.5`. The full hybrid retrieval pipeline (HNSW + BM25 +
-    /// Datalog graph expansion) is planned for v2.
+    /// receive `0.5`. The HashMap backend does not support FTS or HNSW —
+    /// use the `cozo` feature for BM25-ranked FTS and HNSW vector search.
     #[instrument(skip_all, fields(scope = ?scope))]
     async fn search(
         &self,

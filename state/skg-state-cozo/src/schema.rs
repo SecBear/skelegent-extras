@@ -22,12 +22,6 @@
 pub const KV_DDL: &str =
     ":create kv { scope: String, key: String => value: String, created_at: Float }";
 
-/// DDL for the node relation (v1, without embedding).
-///
-/// Retained for reference and documentation only. Use [`NODE_V2_DDL`] for
-/// new schema initializations.
-pub const NODE_DDL: &str = ":create node { scope: String, key: String => data: String, node_type: String, salience: Float, created_at: Float }";
-
 /// Default embedding dimension (OpenAI text-embedding-ada-002).
 pub const DEFAULT_EMBEDDING_DIM: usize = 1536;
 
