@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use layer0::{
-    effect::SignalPayload, AgentId, Effect, OperatorInput, OperatorOutput, OrchError,
+    effect::SignalPayload, OperatorId, Effect, OperatorInput, OperatorOutput, OrchError,
     Orchestrator, QueryPayload, WorkflowId,
 };
 use std::sync::Arc;
@@ -61,17 +61,17 @@ impl MiddlewareOrchestrator {
 impl Orchestrator for MiddlewareOrchestrator {
     async fn dispatch(
         &self,
-        agent: &AgentId,
+        operator: &OperatorId,
         input: OperatorInput,
     ) -> Result<OperatorOutput, OrchError> {
-        let mut output = self.inner.dispatch(agent, input).await?;
+        let mut output = self.inner.dispatch(operator, input).await?;
         output.effects = self.apply_middlewares(output.effects);
         Ok(output)
     }
 
     async fn dispatch_many(
         &self,
-        tasks: Vec<(AgentId, OperatorInput)>,
+        tasks: Vec<(OperatorId, OperatorInput)>,
     ) -> Vec<Result<OperatorOutput, OrchError>> {
         let results = self.inner.dispatch_many(tasks).await;
         results
@@ -116,7 +116,7 @@ mod tests {
     impl Orchestrator for EffectOrchestrator {
         async fn dispatch(
             &self,
-            _agent: &AgentId,
+            _operator: &OperatorId,
             _input: OperatorInput,
         ) -> Result<OperatorOutput, OrchError> {
             Ok({
@@ -128,11 +128,11 @@ mod tests {
 
         async fn dispatch_many(
             &self,
-            tasks: Vec<(AgentId, OperatorInput)>,
+            tasks: Vec<(OperatorId, OperatorInput)>,
         ) -> Vec<Result<OperatorOutput, OrchError>> {
             let mut results = Vec::new();
-            for (agent, input) in tasks {
-                results.push(self.dispatch(&agent, input).await);
+            for (operator, input) in tasks {
+                results.push(self.dispatch(&operator, input).await);
             }
             results
         }
@@ -246,9 +246,9 @@ mod tests {
             effects: vec![write_effect("key1", "value1")],
         });
         let mw = MiddlewareOrchestrator::new(inner, vec![Arc::new(IdentityMiddleware)]);
-        let agent = AgentId::new("test");
+        let operator = OperatorId::new("test");
 
-        let output = mw.dispatch(&agent, make_input()).await.unwrap();
+        let output = mw.dispatch(&operator, make_input()).await.unwrap();
         assert_eq!(output.effects.len(), 1);
 
         if let Effect::WriteMemory { key, value, .. } = &output.effects[0] {
@@ -265,9 +265,9 @@ mod tests {
             effects: vec![write_effect("secret", "password123")],
         });
         let mw = MiddlewareOrchestrator::new(inner, vec![Arc::new(RedactMiddleware)]);
-        let agent = AgentId::new("test");
+        let operator = OperatorId::new("test");
 
-        let output = mw.dispatch(&agent, make_input()).await.unwrap();
+        let output = mw.dispatch(&operator, make_input()).await.unwrap();
 
         if let Effect::WriteMemory { key, value, .. } = &output.effects[0] {
             assert_eq!(key, "secret");
@@ -293,9 +293,9 @@ mod tests {
                 Arc::new(RedactMiddleware),
             ],
         );
-        let agent = AgentId::new("test");
+        let operator = OperatorId::new("test");
 
-        let output = mw.dispatch(&agent, make_input()).await.unwrap();
+        let output = mw.dispatch(&operator, make_input()).await.unwrap();
 
         if let Effect::WriteMemory { key, value, .. } = &output.effects[0] {
             assert_eq!(key, "SECRET");

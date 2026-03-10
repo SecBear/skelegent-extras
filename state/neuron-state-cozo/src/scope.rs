@@ -9,7 +9,7 @@
 //! | `Global` | `"global"` |
 //! | `Session(id)` | `"session:<id>"` |
 //! | `Workflow(id)` | `"workflow:<id>"` |
-//! | `Agent { workflow, agent }` | `"agent:<workflow>:<agent>"` |
+//! | `Operator { workflow, operator }` | `"operator:<workflow>:<operator>"` |
 //! | `Custom(s)` | `"custom:<s>"` |
 
 use layer0::effect::Scope;
@@ -24,7 +24,7 @@ pub fn scope_prefix(scope: &Scope) -> String {
         Scope::Global => "global".to_string(),
         Scope::Session(id) => format!("session:{id}"),
         Scope::Workflow(id) => format!("workflow:{id}"),
-        Scope::Agent { workflow, agent } => format!("agent:{workflow}:{agent}"),
+        Scope::Operator { workflow, operator } => format!("operator:{workflow}:{operator}"),
         Scope::Custom(s) => format!("custom:{s}"),
         // Forward-compatible: serialize unknown variants to JSON.
         _ => serde_json::to_string(scope).unwrap_or_else(|_| "unknown".to_string()),
@@ -52,7 +52,7 @@ pub(crate) fn extract_key<'a>(composite: &'a str, scope_pfx: &str) -> Option<&'a
 #[cfg(test)]
 mod tests {
     use super::*;
-    use layer0::id::{AgentId, SessionId, WorkflowId};
+    use layer0::id::{OperatorId, SessionId, WorkflowId};
 
     #[test]
     fn global_prefix() {
@@ -72,12 +72,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_prefix() {
-        let s = Scope::Agent {
+    fn operator_prefix() {
+        let s = Scope::Operator {
             workflow: WorkflowId::new("wf-1"),
-            agent: AgentId::new("planner"),
+            operator: OperatorId::new("planner"),
         };
-        assert_eq!(scope_prefix(&s), "agent:wf-1:planner");
+        assert_eq!(scope_prefix(&s), "operator:wf-1:planner");
     }
 
     #[test]

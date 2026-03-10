@@ -34,7 +34,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use layer0::operator::TriggerType;
 use layer0::{
-    AgentId, Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput,
+    OperatorId, Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput,
     Orchestrator,
 };
 use neuron_orch_kit::{
@@ -75,7 +75,7 @@ pub struct SweepDecision {
     /// Research results for this decision (caller-supplied).
     ///
     /// When empty, the pipeline short-circuits to `Confirmed(0.3)` without
-    /// dispatching the compare agent.
+    /// dispatching the compare operator.
     pub research_results: Vec<ResearchResult>,
     /// Previous verdict, if any.
     ///
@@ -122,9 +122,9 @@ impl CycleReport {
 
 /// Sequence the sweep cycle pipeline for a batch of decisions.
 ///
-/// Dispatches the compare agent for each decision through `orch`, guarded by
+/// Dispatches the compare operator for each decision through `orch`, guarded by
 /// `budget` and `trace`. When ≥ 3 verdicts are collected, dispatches the
-/// synthesis agent to produce cross-decision analysis.
+/// synthesis operator to produce cross-decision analysis.
 ///
 /// Context assembly (decision card, prior deltas) is **turn-owned**: the
 /// compare operator reads from state during its `execute()`. This function
@@ -133,13 +133,13 @@ impl CycleReport {
 ///
 /// # Parameters
 ///
-/// - `orch` — orchestrator used to dispatch compare and synthesis agents.
+/// - `orch` — orchestrator used to dispatch compare and synthesis operators.
 /// - `state` — scoped state for dedup reads and cycle report persistence.
 /// - `budget` — budget tracker; consulted before each decision and updated
 ///   after each verdict.
 /// - `trace` — composition trace for cycle and depth detection.
-/// - `compare_agent` — [`AgentId`] of the registered compare operator.
-/// - `synthesis_agent` — [`AgentId`] of the registered synthesis operator.
+/// - `compare_operator` — [`OperatorId`] of the registered compare operator.
+/// - `synthesis_operator` — [`OperatorId`] of the registered synthesis operator.
 /// - `budget_total_usd` — full budget cap in USD; used to compute the
 ///   remaining-budget ratio for processor tier selection.
 /// - `decisions` — batch of decisions to sweep in this cycle.
@@ -156,8 +156,8 @@ pub async fn run_sweep_cycle<B: BudgetPolicy>(
     state: &dyn ScopedState,
     budget: &BudgetTracker<B>,
     trace: &CompositionTrace,
-    compare_agent: &AgentId,
-    synthesis_agent: &AgentId,
+    compare_operator: &OperatorId,
+    synthesis_operator: &OperatorId,
     budget_total_usd: f64,
     decisions: Vec<SweepDecision>,
 ) -> Result<CycleReport, SweepError> {
@@ -231,7 +231,7 @@ pub async fn run_sweep_cycle<B: BudgetPolicy>(
         // Step 5: TRACE ENTER
         // Guard against dispatch cycles and excessive depth.
         // ------------------------------------------------------------------
-        let span = match trace.enter(compare_agent) {
+        let span = match trace.enter(compare_operator) {
             Ok(span) => span,
             Err(e) => {
                 report.skipped.push((d.id.clone(), format!("trace enter failed: {e}")));
@@ -251,7 +251,7 @@ pub async fn run_sweep_cycle<B: BudgetPolicy>(
         };
         let dispatch_result = dispatch_typed::<CompareInput, SweepVerdict>(
             orch,
-            compare_agent,
+            compare_operator,
             compare_in,
             TriggerType::Task,
         )
@@ -298,7 +298,7 @@ pub async fn run_sweep_cycle<B: BudgetPolicy>(
         };
         match dispatch_typed::<SynthesisInput, SynthesisReport>(
             orch,
-            synthesis_agent,
+            synthesis_operator,
             synthesis_in,
             TriggerType::Task,
         )
@@ -347,8 +347,8 @@ pub struct SweepCycleOperator<B: BudgetPolicy> {
     state: Arc<dyn ScopedState>,
     budget: Arc<BudgetTracker<B>>,
     trace: Arc<CompositionTrace>,
-    compare_agent: AgentId,
-    synthesis_agent: AgentId,
+    compare_operator: OperatorId,
+    synthesis_operator: OperatorId,
     budget_total_usd: f64,
 }
 
@@ -357,20 +357,20 @@ impl<B: BudgetPolicy> SweepCycleOperator<B> {
     ///
     /// # Parameters
     ///
-    /// - `orch` — orchestrator used to dispatch compare and synthesis agents.
+    /// - `orch` — orchestrator used to dispatch compare and synthesis operators.
     /// - `state` — scoped state for dedup reads and cycle report persistence.
     /// - `budget` — shared budget tracker; shared across dispatches.
     /// - `trace` — composition trace for cycle/depth detection.
-    /// - `compare_agent` — [`AgentId`] of the registered compare operator.
-    /// - `synthesis_agent` — [`AgentId`] of the registered synthesis operator.
+    /// - `compare_operator` — [`OperatorId`] of the registered compare operator.
+    /// - `synthesis_operator` — [`OperatorId`] of the registered synthesis operator.
     /// - `budget_total_usd` — full budget cap in USD.
     pub fn new(
         orch: Arc<dyn Orchestrator>,
         state: Arc<dyn ScopedState>,
         budget: Arc<BudgetTracker<B>>,
         trace: Arc<CompositionTrace>,
-        compare_agent: AgentId,
-        synthesis_agent: AgentId,
+        compare_operator: OperatorId,
+        synthesis_operator: OperatorId,
         budget_total_usd: f64,
     ) -> Self {
         Self {
@@ -378,8 +378,8 @@ impl<B: BudgetPolicy> SweepCycleOperator<B> {
             state,
             budget,
             trace,
-            compare_agent,
-            synthesis_agent,
+            compare_operator,
+            synthesis_operator,
             budget_total_usd,
         }
     }
@@ -405,8 +405,8 @@ impl<B: BudgetPolicy + 'static> Operator for SweepCycleOperator<B> {
             self.state.as_ref(),
             self.budget.as_ref(),
             self.trace.as_ref(),
-            &self.compare_agent,
-            &self.synthesis_agent,
+            &self.compare_operator,
+            &self.synthesis_operator,
             self.budget_total_usd,
             decisions,
         )
@@ -439,7 +439,7 @@ mod tests {
     use layer0::effect::SignalPayload;
     use layer0::orchestrator::QueryPayload;
     use layer0::{
-        AgentId, Content, ExitReason, OperatorInput, OperatorOutput, OrchError, Orchestrator,
+        OperatorId, Content, ExitReason, OperatorInput, OperatorOutput, OrchError, Orchestrator,
         Scope, WorkflowId,
     };
     use layer0::test_utils::InMemoryStore;
@@ -512,9 +512,9 @@ mod tests {
     /// a canned synthesis report for synthesis dispatches. Tracks whether
     /// synthesis was dispatched via an atomic flag.
     struct MockOrchestrator {
-        #[allow(dead_code)] // used only to construct; dispatch routes by synthesis_agent
-        compare_agent: AgentId,
-        synthesis_agent: AgentId,
+        #[allow(dead_code)] // used only to construct; dispatch routes by synthesis_operator
+        compare_operator: OperatorId,
+        synthesis_operator: OperatorId,
         compare_response: String,
         synthesis_response: String,
         synthesis_dispatched: Arc<AtomicBool>,
@@ -522,15 +522,15 @@ mod tests {
 
     impl MockOrchestrator {
         fn new(
-            compare_agent: AgentId,
-            synthesis_agent: AgentId,
+            compare_operator: OperatorId,
+            synthesis_operator: OperatorId,
             verdict: &SweepVerdict,
             synthesis: &SynthesisReport,
         ) -> (Self, Arc<AtomicBool>) {
             let flag = Arc::new(AtomicBool::new(false));
             let orch = Self {
-                compare_agent: compare_agent.clone(),
-                synthesis_agent: synthesis_agent.clone(),
+                compare_operator: compare_operator.clone(),
+                synthesis_operator: synthesis_operator.clone(),
                 compare_response: serde_json::to_string(verdict).expect("serialize verdict"),
                 synthesis_response: serde_json::to_string(synthesis)
                     .expect("serialize synthesis"),
@@ -544,10 +544,10 @@ mod tests {
     impl Orchestrator for MockOrchestrator {
         async fn dispatch(
             &self,
-            agent: &AgentId,
+            operator: &OperatorId,
             _input: OperatorInput,
         ) -> Result<OperatorOutput, OrchError> {
-            let json = if *agent == self.synthesis_agent {
+            let json = if *operator == self.synthesis_operator {
                 self.synthesis_dispatched.store(true, Ordering::SeqCst);
                 self.synthesis_response.clone()
             } else {
@@ -561,11 +561,11 @@ mod tests {
 
         async fn dispatch_many(
             &self,
-            tasks: Vec<(AgentId, OperatorInput)>,
+            tasks: Vec<(OperatorId, OperatorInput)>,
         ) -> Vec<Result<OperatorOutput, OrchError>> {
             let mut results = Vec::new();
-            for (agent, input) in tasks {
-                results.push(self.dispatch(&agent, input).await);
+            for (operator, input) in tasks {
+                results.push(self.dispatch(&operator, input).await);
             }
             results
         }
@@ -595,14 +595,14 @@ mod tests {
     /// collected in `skipped` and no verdicts should be produced.
     #[tokio::test]
     async fn run_sweep_cycle_skips_when_budget_denied() {
-        let compare_agent = AgentId::new("compare");
-        let synthesis_agent = AgentId::new("synthesis");
+        let compare_operator = OperatorId::new("compare");
+        let synthesis_operator = OperatorId::new("synthesis");
         let verdict = dummy_verdict("d1");
         let synthesis = dummy_synthesis_report();
 
         let (orch, _flag) = MockOrchestrator::new(
-            compare_agent.clone(),
-            synthesis_agent.clone(),
+            compare_operator.clone(),
+            synthesis_operator.clone(),
             &verdict,
             &synthesis,
         );
@@ -633,8 +633,8 @@ mod tests {
             &state,
             &budget,
             &trace,
-            &compare_agent,
-            &synthesis_agent,
+            &compare_operator,
+            &synthesis_operator,
             10.0,
             decisions,
         )
@@ -654,17 +654,17 @@ mod tests {
     }
 
     /// A decision with empty research_results should produce a
-    /// `Confirmed(0.3)` verdict without dispatching the compare agent.
+    /// `Confirmed(0.3)` verdict without dispatching the compare operator.
     #[tokio::test]
     async fn run_sweep_cycle_skips_empty_research() {
-        let compare_agent = AgentId::new("compare");
-        let synthesis_agent = AgentId::new("synthesis");
+        let compare_operator = OperatorId::new("compare");
+        let synthesis_operator = OperatorId::new("synthesis");
         let verdict = dummy_verdict("d1");
         let synthesis = dummy_synthesis_report();
 
         let (orch, _flag) = MockOrchestrator::new(
-            compare_agent.clone(),
-            synthesis_agent.clone(),
+            compare_operator.clone(),
+            synthesis_operator.clone(),
             &verdict,
             &synthesis,
         );
@@ -684,8 +684,8 @@ mod tests {
             &state,
             &budget,
             &trace,
-            &compare_agent,
-            &synthesis_agent,
+            &compare_operator,
+            &synthesis_operator,
             100.0,
             decisions,
         )
@@ -710,14 +710,14 @@ mod tests {
     /// is dispatched and the returned verdict collected in the report.
     #[tokio::test]
     async fn run_sweep_cycle_dispatches_compare() {
-        let compare_agent = AgentId::new("compare");
-        let synthesis_agent = AgentId::new("synthesis");
+        let compare_operator = OperatorId::new("compare");
+        let synthesis_operator = OperatorId::new("synthesis");
         let expected_verdict = dummy_verdict("d1");
         let synthesis = dummy_synthesis_report();
 
         let (orch, _flag) = MockOrchestrator::new(
-            compare_agent.clone(),
-            synthesis_agent.clone(),
+            compare_operator.clone(),
+            synthesis_operator.clone(),
             &expected_verdict,
             &synthesis,
         );
@@ -737,8 +737,8 @@ mod tests {
             &state,
             &budget,
             &trace,
-            &compare_agent,
-            &synthesis_agent,
+            &compare_operator,
+            &synthesis_operator,
             100.0,
             decisions,
         )
@@ -757,14 +757,14 @@ mod tests {
     /// and the synthesis report attached to the cycle report.
     #[tokio::test]
     async fn run_sweep_cycle_triggers_synthesis_at_threshold() {
-        let compare_agent = AgentId::new("compare");
-        let synthesis_agent = AgentId::new("synthesis");
+        let compare_operator = OperatorId::new("compare");
+        let synthesis_operator = OperatorId::new("synthesis");
         let verdict = dummy_verdict("dx");
         let synthesis = dummy_synthesis_report();
 
         let (orch, synthesis_dispatched) = MockOrchestrator::new(
-            compare_agent.clone(),
-            synthesis_agent.clone(),
+            compare_operator.clone(),
+            synthesis_operator.clone(),
             &verdict,
             &synthesis,
         );
@@ -796,8 +796,8 @@ mod tests {
             &state,
             &budget,
             &trace,
-            &compare_agent,
-            &synthesis_agent,
+            &compare_operator,
+            &synthesis_operator,
             100.0,
             decisions,
         )

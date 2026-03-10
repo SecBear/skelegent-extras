@@ -13,7 +13,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::Parser;
 use layer0::effect::Scope;
-use layer0::id::AgentId;
+use layer0::id::OperatorId;
 use layer0::state::StateStore;
 use layer0::test_utils::InMemoryStore;
 use neuron_auth::AuthProviderChain;
@@ -205,14 +205,14 @@ async fn main() -> anyhow::Result<()> {
         sweep_decisions.len()
     );
 
-    let compare_agent = AgentId::new("compare");
-    let synthesis_agent = AgentId::new("synthesis");
+    let compare_operator = OperatorId::new("compare");
+    let synthesis_operator = OperatorId::new("synthesis");
     let compare_config = CompareConfig::default(); // force_ultra: true
 
     // Build a local orchestrator with the two operators registered.
     let mut orch = layer0::test_utils::LocalOrchestrator::new();
     orch.register(
-        compare_agent.clone(),
+        compare_operator.clone(),
         Arc::new(CompareOperator::new(
             compare_llm,
             Arc::clone(&scoped) as _,
@@ -220,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
         )),
     );
     orch.register(
-        synthesis_agent.clone(),
+        synthesis_operator.clone(),
         Arc::new(SynthesisOperator::new(
             synthesis_llm,
             Arc::clone(&scoped) as _,
@@ -239,8 +239,8 @@ async fn main() -> anyhow::Result<()> {
         scoped.as_ref(),
         &budget,
         &trace,
-        &compare_agent,
-        &synthesis_agent,
+        &compare_operator,
+        &synthesis_operator,
         cli.budget_cap,
         sweep_decisions,
     )

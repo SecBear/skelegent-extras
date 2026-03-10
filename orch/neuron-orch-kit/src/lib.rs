@@ -8,7 +8,7 @@
 //! - [`BudgetTracker`] / [`BudgetPolicy`] — generic budget enforcement with pluggable policies
 //! - [`CompositionTrace`] — span-based tracing with cycle detection for nested dispatch
 //! - [`EffectMiddleware`] / [`MiddlewareOrchestrator`] — intercept and transform effects at the dispatch boundary
-//! - [`RoutingOrchestrator`] — route dispatches to backend orchestrators by agent name
+//! - [`RoutingOrchestrator`] — route dispatches to backend orchestrators by operator name
 //!
 //! [`StateStore`]: layer0::StateStore
 

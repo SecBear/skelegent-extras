@@ -3,7 +3,7 @@
 //! [`CompositionTrace`] tracks nested dispatch calls as a stack of spans.
 //! It detects cycles (A → B → A) and enforces maximum dispatch depth.
 
-use layer0::AgentId;
+use layer0::OperatorId;
 use std::sync::Mutex;
 use thiserror::Error;
 
@@ -11,11 +11,11 @@ use thiserror::Error;
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum TraceError {
-    /// A dispatch cycle was detected (agent already on the stack).
-    #[error("cycle detected: {agent} is already on the dispatch stack")]
+    /// A dispatch cycle was detected (operator already on the stack).
+    #[error("cycle detected: {operator} is already on the dispatch stack")]
     CycleDetected {
-        /// The agent that caused the cycle.
-        agent: AgentId,
+        /// The operator that caused the cycle.
+        operator: OperatorId,
     },
     /// Maximum dispatch depth exceeded.
     #[error("max depth {max_depth} exceeded (current depth: {current_depth})")]
@@ -30,8 +30,8 @@ pub enum TraceError {
 /// A span in the composition trace representing a single dispatch.
 #[derive(Debug, Clone)]
 pub struct TraceSpan {
-    /// The agent being dispatched to.
-    pub agent_id: AgentId,
+    /// The operator being dispatched to.
+    pub operator_id: OperatorId,
     /// Depth in the dispatch stack (0-indexed).
     pub depth: usize,
 }
@@ -41,7 +41,7 @@ pub struct TraceSpan {
 /// Thread-safe — uses interior mutability via [`Mutex`].
 /// Clone produces a new trace with the same configuration but empty stack.
 pub struct CompositionTrace {
-    stack: Mutex<Vec<AgentId>>,
+    stack: Mutex<Vec<OperatorId>>,
     max_depth: usize,
 }
 
@@ -65,23 +65,23 @@ impl CompositionTrace {
         }
     }
 
-    /// Enter a dispatch to the given agent.
+    /// Enter a dispatch to the given operator.
     ///
     /// Returns a [`TraceSpan`] on success. The caller must call [`exit`] when
     /// the dispatch completes.
     ///
     /// # Errors
     ///
-    /// Returns [`TraceError::CycleDetected`] if the agent is already on the stack.
+    /// Returns [`TraceError::CycleDetected`] if the operator is already on the stack.
     /// Returns [`TraceError::MaxDepthExceeded`] if the stack depth would exceed `max_depth`.
     ///
     /// [`exit`]: CompositionTrace::exit
-    pub fn enter(&self, agent_id: &AgentId) -> Result<TraceSpan, TraceError> {
+    pub fn enter(&self, operator_id: &OperatorId) -> Result<TraceSpan, TraceError> {
         let mut stack = self.stack.lock().unwrap();
 
-        if stack.contains(agent_id) {
+        if stack.contains(operator_id) {
             return Err(TraceError::CycleDetected {
-                agent: agent_id.clone(),
+                operator: operator_id.clone(),
             });
         }
 
@@ -93,27 +93,27 @@ impl CompositionTrace {
         }
 
         let depth = stack.len();
-        stack.push(agent_id.clone());
+        stack.push(operator_id.clone());
 
         Ok(TraceSpan {
-            agent_id: agent_id.clone(),
+            operator_id: operator_id.clone(),
             depth,
         })
     }
 
-    /// Exit a dispatch. Pops the agent from the stack.
+    /// Exit a dispatch. Pops the operator from the stack.
     ///
     /// # Panics
     ///
-    /// Panics if the stack is empty or the top doesn't match the span's agent.
+    /// Panics if the stack is empty or the top doesn't match the span's operator.
     /// This indicates a programming error (mismatched enter/exit calls).
     pub fn exit(&self, span: &TraceSpan) {
         let mut stack = self.stack.lock().unwrap();
         let popped = stack.pop().expect("exit called on empty trace stack");
         assert_eq!(
-            popped, span.agent_id,
+            popped, span.operator_id,
             "trace stack mismatch: expected {:?}, got {:?}",
-            span.agent_id, popped
+            span.operator_id, popped
         );
     }
 
@@ -122,9 +122,9 @@ impl CompositionTrace {
         self.stack.lock().unwrap().len()
     }
 
-    /// Check if an agent is currently on the dispatch stack.
-    pub fn contains(&self, agent_id: &AgentId) -> bool {
-        self.stack.lock().unwrap().contains(agent_id)
+    /// Check if an operator is currently on the dispatch stack.
+    pub fn contains(&self, operator_id: &OperatorId) -> bool {
+        self.stack.lock().unwrap().contains(operator_id)
     }
 }
 
@@ -132,19 +132,19 @@ impl CompositionTrace {
 mod tests {
     use super::*;
 
-    fn agent(name: &str) -> AgentId {
-        AgentId::new(name)
+    fn operator(name: &str) -> OperatorId {
+        OperatorId::new(name)
     }
 
     #[test]
     fn happy_path_nesting() {
         let trace = CompositionTrace::new(10);
 
-        let span_a = trace.enter(&agent("a")).unwrap();
+        let span_a = trace.enter(&operator("a")).unwrap();
         assert_eq!(span_a.depth, 0);
         assert_eq!(trace.depth(), 1);
 
-        let span_b = trace.enter(&agent("b")).unwrap();
+        let span_b = trace.enter(&operator("b")).unwrap();
         assert_eq!(span_b.depth, 1);
         assert_eq!(trace.depth(), 2);
 
@@ -159,27 +159,27 @@ mod tests {
     fn cycle_detection() {
         let trace = CompositionTrace::new(10);
 
-        let span_a = trace.enter(&agent("a")).unwrap();
-        let _span_b = trace.enter(&agent("b")).unwrap();
+        let span_a = trace.enter(&operator("a")).unwrap();
+        let _span_b = trace.enter(&operator("b")).unwrap();
 
         // a is already on the stack
-        let result = trace.enter(&agent("a"));
+        let result = trace.enter(&operator("a"));
         assert!(matches!(result, Err(TraceError::CycleDetected { .. })));
 
         // After exiting, a can be entered again
         trace.exit(&_span_b);
         trace.exit(&span_a);
-        let _span_a2 = trace.enter(&agent("a")).unwrap();
+        let _span_a2 = trace.enter(&operator("a")).unwrap();
     }
 
     #[test]
     fn max_depth_exceeded() {
         let trace = CompositionTrace::new(2);
 
-        let _s1 = trace.enter(&agent("a")).unwrap();
-        let _s2 = trace.enter(&agent("b")).unwrap();
+        let _s1 = trace.enter(&operator("a")).unwrap();
+        let _s2 = trace.enter(&operator("b")).unwrap();
 
-        let result = trace.enter(&agent("c"));
+        let result = trace.enter(&operator("c"));
         assert!(matches!(result, Err(TraceError::MaxDepthExceeded { .. })));
     }
 
@@ -187,23 +187,23 @@ mod tests {
     fn contains_check() {
         let trace = CompositionTrace::new(10);
 
-        assert!(!trace.contains(&agent("a")));
-        let span = trace.enter(&agent("a")).unwrap();
-        assert!(trace.contains(&agent("a")));
-        assert!(!trace.contains(&agent("b")));
+        assert!(!trace.contains(&operator("a")));
+        let span = trace.enter(&operator("a")).unwrap();
+        assert!(trace.contains(&operator("a")));
+        assert!(!trace.contains(&operator("b")));
         trace.exit(&span);
-        assert!(!trace.contains(&agent("a")));
+        assert!(!trace.contains(&operator("a")));
     }
 
     #[test]
     fn reentry_after_exit() {
         let trace = CompositionTrace::new(10);
 
-        let span = trace.enter(&agent("a")).unwrap();
+        let span = trace.enter(&operator("a")).unwrap();
         trace.exit(&span);
 
-        // Same agent can be entered again after exit
-        let span2 = trace.enter(&agent("a")).unwrap();
+        // Same operator can be entered again after exit
+        let span2 = trace.enter(&operator("a")).unwrap();
         assert_eq!(span2.depth, 0);
         trace.exit(&span2);
     }

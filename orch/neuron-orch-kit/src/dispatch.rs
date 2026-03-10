@@ -1,7 +1,7 @@
 //! Type-safe operator dispatch with automatic serialization.
 
 use layer0::{
-    operator::TriggerType, AgentId, Content, OperatorInput, OperatorOutput, OrchError, Orchestrator,
+    operator::TriggerType, OperatorId, Content, OperatorInput, OperatorOutput, OrchError, Orchestrator,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
@@ -43,7 +43,7 @@ pub enum DispatchError {
 /// into `O`, or [`DispatchError::Orchestrator`] if the underlying dispatch fails.
 pub async fn dispatch_typed<I, O>(
     orch: &dyn Orchestrator,
-    agent: &AgentId,
+    operator: &OperatorId,
     input: I,
     trigger: TriggerType,
 ) -> Result<(O, OperatorOutput), DispatchError>
@@ -60,7 +60,7 @@ where
     let mut op_input = OperatorInput::new(Content::text(json_text), trigger);
     op_input.metadata = metadata;
 
-    let output = orch.dispatch(agent, op_input).await?;
+    let output = orch.dispatch(operator, op_input).await?;
 
     let text = output
         .message
@@ -102,7 +102,7 @@ mod tests {
     impl Orchestrator for EchoOrchestrator {
         async fn dispatch(
             &self,
-            _agent: &AgentId,
+            _operator: &OperatorId,
             input: OperatorInput,
         ) -> Result<OperatorOutput, OrchError> {
             Ok({
@@ -114,11 +114,11 @@ mod tests {
 
         async fn dispatch_many(
             &self,
-            tasks: Vec<(AgentId, OperatorInput)>,
+            tasks: Vec<(OperatorId, OperatorInput)>,
         ) -> Vec<Result<OperatorOutput, OrchError>> {
             let mut results = Vec::new();
-            for (agent, input) in tasks {
-                results.push(self.dispatch(&agent, input).await);
+            for (operator, input) in tasks {
+                results.push(self.dispatch(&operator, input).await);
             }
             results
         }
@@ -149,7 +149,7 @@ mod tests {
     impl Orchestrator for FixedOrchestrator {
         async fn dispatch(
             &self,
-            _agent: &AgentId,
+            _operator: &OperatorId,
             _input: OperatorInput,
         ) -> Result<OperatorOutput, OrchError> {
             Ok({
@@ -161,11 +161,11 @@ mod tests {
 
         async fn dispatch_many(
             &self,
-            tasks: Vec<(AgentId, OperatorInput)>,
+            tasks: Vec<(OperatorId, OperatorInput)>,
         ) -> Vec<Result<OperatorOutput, OrchError>> {
             let mut results = Vec::new();
-            for (agent, input) in tasks {
-                results.push(self.dispatch(&agent, input).await);
+            for (operator, input) in tasks {
+                results.push(self.dispatch(&operator, input).await);
             }
             results
         }
@@ -190,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn typed_roundtrip_with_echo() {
         let orch = Arc::new(EchoOrchestrator);
-        let agent = AgentId::new("test-agent");
+        let operator = OperatorId::new("test-agent");
         let input = TestInput {
             question: "what is 2+2?".into(),
         };
@@ -198,7 +198,7 @@ mod tests {
         // Echo returns the serialized input as output, so we deserialize it
         // back into TestInput (not TestOutput).
         let (output, raw): (TestInput, _) =
-            dispatch_typed(&*orch, &agent, input.clone(), TriggerType::Task)
+            dispatch_typed(&*orch, &operator, input.clone(), TriggerType::Task)
                 .await
                 .unwrap();
 
@@ -211,11 +211,11 @@ mod tests {
         let orch = Arc::new(FixedOrchestrator {
             response: r#"{"answer":"four"}"#.into(),
         });
-        let agent = AgentId::new("test-agent");
+        let operator = OperatorId::new("test-agent");
 
         let (output, _): (TestOutput, _) = dispatch_typed(
             &*orch,
-            &agent,
+            &operator,
             TestInput {
                 question: "what is 2+2?".into(),
             },
@@ -237,11 +237,11 @@ mod tests {
         let orch = Arc::new(FixedOrchestrator {
             response: "not valid json for TestOutput".into(),
         });
-        let agent = AgentId::new("test-agent");
+        let operator = OperatorId::new("test-agent");
 
         let result: Result<(TestOutput, _), _> = dispatch_typed(
             &*orch,
-            &agent,
+            &operator,
             TestInput {
                 question: "hello".into(),
             },
@@ -256,13 +256,13 @@ mod tests {
     async fn metadata_carries_structured_input() {
         // Verify that the metadata field carries the full structured input
         let orch = Arc::new(EchoOrchestrator);
-        let agent = AgentId::new("test-agent");
+        let operator = OperatorId::new("test-agent");
         let input = TestInput {
             question: "test".into(),
         };
 
         let (_, raw) =
-            dispatch_typed::<_, TestInput>(&*orch, &agent, input, TriggerType::Task)
+            dispatch_typed::<_, TestInput>(&*orch, &operator, input, TriggerType::Task)
                 .await
                 .unwrap();
 

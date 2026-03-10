@@ -3,7 +3,7 @@
 //! All tests use the in-memory engine — no filesystem, no network.
 
 use layer0::effect::Scope;
-use layer0::id::{AgentId, SessionId, WorkflowId};
+use layer0::id::{OperatorId, SessionId, WorkflowId};
 use layer0::state::{MemoryLink, StateStore};
 use neuron_state_cozo::CozoStore;
 use serde_json::json;
@@ -22,10 +22,10 @@ fn workflow(id: &str) -> Scope {
     Scope::Workflow(WorkflowId::new(id))
 }
 
-fn agent(wf: &str, ag: &str) -> Scope {
-    Scope::Agent {
+fn operator(wf: &str, ag: &str) -> Scope {
+    Scope::Operator {
         workflow: WorkflowId::new(wf),
-        agent: AgentId::new(ag),
+        operator: OperatorId::new(ag),
     }
 }
 
@@ -188,7 +188,7 @@ async fn search_respects_limit() {
 #[tokio::test]
 async fn link_and_traverse() {
     let s = store();
-    let scope = agent("wf-1", "planner");
+    let scope = operator("wf-1", "planner");
 
     // Ensure nodes exist in the KV store.
     s.write(&scope, "node:A", json!("source node")).await.unwrap();
@@ -347,7 +347,7 @@ async fn all_scope_variants_work() {
         Scope::Global,
         session("s1"),
         workflow("wf-1"),
-        agent("wf-1", "a1"),
+        operator("wf-1", "a1"),
         Scope::Custom("pipeline/stage-1".to_string()),
     ];
 

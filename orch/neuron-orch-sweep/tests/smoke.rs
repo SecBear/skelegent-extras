@@ -14,7 +14,7 @@ use layer0::error::StateError;
 use layer0::operator::TriggerType;
 use layer0::state::{SearchResult, StateStore, StoreOptions};
 use neuron_effects_git::{PrAction, route_verdict};
-use layer0::id::AgentId;
+use layer0::id::OperatorId;
 use layer0::test_utils::LocalOrchestrator;
 use neuron_op_sweep::{
     CompareOperator, CompareConfig, EvidenceItem, EvidenceStance, ProcessorTier, ResearchResult,
@@ -215,7 +215,7 @@ async fn smoke_full_cycle_with_three_decisions() {
             let s = Arc::clone(&store_clone);
             Box::pin(async move {
                 let mut orch = LocalOrchestrator::new();
-                let compare_id = AgentId::new("compare");
+                let compare_id = OperatorId::new("compare");
                 let cfg = CompareConfig {
                     min_sweep_interval: Duration::from_secs(0),
                     ..CompareConfig::default()
@@ -319,7 +319,7 @@ async fn smoke_budget_exhaustion_stops_cycle() {
             let s = Arc::clone(&store_clone);
             Box::pin(async move {
                 let mut orch = LocalOrchestrator::new();
-                let compare_id = AgentId::new("compare");
+                let compare_id = OperatorId::new("compare");
                 let cfg = CompareConfig::default();
                 let scoped = Arc::new(ScopedStateView::new(Arc::clone(&s) as Arc<dyn StateStore>, Scope::Custom("sweep".into())));
                 orch.register(compare_id.clone(), Arc::new(CompareOperator::new(TestLlm, scoped, cfg)));
