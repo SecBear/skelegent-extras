@@ -1,5 +1,5 @@
 #![deny(missing_docs)]
-//! Temporal-backed [`Orchestrator`] implementation for skelegent.
+//! Temporal-backed [`Dispatcher`] + [`Signalable`] + [`Queryable`] implementation for skelegent.
 //!
 //! # Feature flags
 //!
@@ -10,7 +10,7 @@
 //! # Public surface
 //!
 //! Only three types are exported:
-//! - [`TemporalOrch`] — the `Orchestrator` implementation
+//! - [`TemporalOrch`] — the `Dispatcher` + `Signalable` + `Queryable` implementation
 //! - [`TemporalConfig`] — server connection settings
 //! - [`RetryPolicy`] — retry/backoff parameters
 //!
@@ -19,7 +19,7 @@
 //! # Constitution compliance
 //!
 //! Concrete service clients are private inside the crate and never exported.
-//! Consumers programme against the [`Orchestrator`] trait from `layer0`.
+//! Consumers programme against the [`Dispatcher`] trait from `layer0` and [`Signalable`]/[`Queryable`] traits from `skg-effects-core`.
 
 mod client;
 pub mod config;
@@ -33,7 +33,7 @@ use layer0::effect::SignalPayload;
 use layer0::error::OrchError;
 use layer0::id::{OperatorId, WorkflowId};
 use layer0::operator::{Operator, OperatorInput, OperatorOutput};
-use layer0::orchestrator::{Orchestrator, QueryPayload};
+use skg_effects_core::{Queryable, QueryPayload, Signalable};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -41,7 +41,8 @@ use tokio::sync::RwLock;
 
 // ── TemporalOrch ───────────────────────────────────────────────────────────
 
-/// Temporal-backed orchestrator implementing the layer0 [`Orchestrator`] trait.
+/// Temporal-backed orchestrator implementing the layer0 [`Dispatcher`],
+/// [`Signalable`], and [`Queryable`] traits.
 ///
 /// By default (no `temporal-sdk` feature) this uses an in-process
 /// [`MockTemporalClient`][crate::client] so the crate can be compiled and
@@ -126,7 +127,7 @@ impl TemporalOrch {
     }
 }
 
-// ── Orchestrator impl ──────────────────────────────────────────────────────
+// ── Dispatcher impl ──────────────────────────────────────────────────────
 
 #[async_trait]
 impl Dispatcher for TemporalOrch {
@@ -152,22 +153,10 @@ impl Dispatcher for TemporalOrch {
     }
 }
 
+// ── Signalable + Queryable impl ──────────────────────────────────────────────
+
 #[async_trait]
-impl Orchestrator for TemporalOrch {
-
-    async fn dispatch_many(
-        &self,
-        tasks: Vec<(OperatorId, OperatorInput)>,
-    ) -> Vec<Result<OperatorOutput, OrchError>> {
-        // Phase 1: sequential dispatch. Temporal handles true parallelism in
-        // Phase 2 via child workflows / activity scheduling.
-        let mut results = Vec::with_capacity(tasks.len());
-        for (operator_id, input) in tasks {
-            results.push(self.dispatch(&operator_id, input).await);
-        }
-        results
-    }
-
+impl Signalable for TemporalOrch {
     async fn signal(&self, target: &WorkflowId, signal: SignalPayload) -> Result<(), OrchError> {
         // Serialise the payload for the client.
         let bytes = serde_json::to_vec(&signal)
@@ -188,7 +177,10 @@ impl Orchestrator for TemporalOrch {
             .push(signal);
         Ok(())
     }
+}
 
+#[async_trait]
+impl Queryable for TemporalOrch {
     async fn query(
         &self,
         target: &WorkflowId,

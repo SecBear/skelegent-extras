@@ -6,11 +6,11 @@
 //! operator.
 //!
 //! [`CompareOperator`] implements the [`Operator`] trait, allowing it to be
-//! dispatched via an [`Orchestrator`] without violating the effects boundary.
+//! dispatched via a [`Dispatcher`] without violating the effects boundary.
 //! Use the sweep cycle composition function to sequence context assembly
 //! and comparison.
 //!
-//! [`Orchestrator`]: layer0::Orchestrator
+//! [`Dispatcher`]: layer0::dispatch::Dispatcher
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

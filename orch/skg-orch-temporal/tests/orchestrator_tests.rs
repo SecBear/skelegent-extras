@@ -8,7 +8,7 @@ use layer0::effect::SignalPayload;
 use layer0::error::{OperatorError, OrchError};
 use layer0::id::{OperatorId, WorkflowId};
 use layer0::operator::{ExitReason, Operator, OperatorInput, OperatorOutput, TriggerType};
-use layer0::orchestrator::{Orchestrator, QueryPayload};
+use skg_effects_core::{Queryable, QueryPayload, Signalable};
 use layer0::test_utils::EchoOperator;
 use skg_orch_temporal::{RetryPolicy, TemporalConfig, TemporalOrch};
 use std::sync::Arc;
@@ -109,21 +109,17 @@ async fn dispatch_many_all_succeed() {
     orch.register(OperatorId::new("a"), Arc::new(EchoOperator));
     orch.register(OperatorId::new("b"), Arc::new(EchoOperator));
 
-    let tasks = vec![
-        (OperatorId::new("a"), simple_input("msg-a")),
-        (OperatorId::new("b"), simple_input("msg-b")),
-    ];
-    let results = orch.dispatch_many(tasks).await;
+    let result_a = orch
+        .dispatch(&OperatorId::new("a"), simple_input("msg-a"))
+        .await
+        .expect("dispatch a should succeed");
+    let result_b = orch
+        .dispatch(&OperatorId::new("b"), simple_input("msg-b"))
+        .await
+        .expect("dispatch b should succeed");
 
-    assert_eq!(results.len(), 2);
-    assert_eq!(
-        results[0].as_ref().unwrap().message,
-        Content::text("msg-a")
-    );
-    assert_eq!(
-        results[1].as_ref().unwrap().message,
-        Content::text("msg-b")
-    );
+    assert_eq!(result_a.message, Content::text("msg-a"));
+    assert_eq!(result_b.message, Content::text("msg-b"));
 }
 
 #[tokio::test]
@@ -132,17 +128,17 @@ async fn dispatch_many_partial_failure() {
     orch.register(OperatorId::new("ok"), Arc::new(EchoOperator));
     // "bad" is intentionally not registered.
 
-    let tasks = vec![
-        (OperatorId::new("ok"), simple_input("fine")),
-        (OperatorId::new("bad"), simple_input("boom")),
-    ];
-    let results = orch.dispatch_many(tasks).await;
+    let ok_result = orch
+        .dispatch(&OperatorId::new("ok"), simple_input("fine"))
+        .await;
+    let bad_result = orch
+        .dispatch(&OperatorId::new("bad"), simple_input("boom"))
+        .await;
 
-    assert_eq!(results.len(), 2);
-    assert!(results[0].is_ok(), "known agent should succeed");
-    assert!(results[1].is_err(), "unknown agent should fail");
+    assert!(ok_result.is_ok(), "known agent should succeed");
+    assert!(bad_result.is_err(), "unknown agent should fail");
     assert!(matches!(
-        results[1].as_ref().unwrap_err(),
+        bad_result.unwrap_err(),
         OrchError::OperatorNotFound(_)
     ));
 }
