@@ -152,7 +152,7 @@ struct AlwaysFailOperator;
 
 #[async_trait::async_trait]
 impl Operator for AlwaysFailOperator {
-    async fn execute(&self, _input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, _input: OperatorInput, _caps: &layer0::dispatch::Capabilities) -> Result<OperatorOutput, OperatorError> {
         Err(OperatorError::NonRetryable("intentional failure".into()))
     }
 }

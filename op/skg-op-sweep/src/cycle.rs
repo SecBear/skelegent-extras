@@ -387,7 +387,7 @@ impl<B: BudgetPolicy> SweepCycleOperator<B> {
 
 #[async_trait]
 impl<B: BudgetPolicy + 'static> Operator for SweepCycleOperator<B> {
-    async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _caps: &layer0::dispatch::Capabilities) -> Result<OperatorOutput, OperatorError> {
         let text = input.message.as_text().ok_or_else(|| {
             OperatorError::NonRetryable(
                 "SweepCycleOperator: input.message must be JSON text".into(),
