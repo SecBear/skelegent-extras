@@ -178,7 +178,7 @@ impl TemporalClient for MockTemporalClient {
 
         // ── 4. Execute (async; all locks released) ─────────────────────────
         let output = op
-            .execute(operator_input, &layer0::dispatch::Capabilities::none())
+            .execute(operator_input)
             .await
             .map_err(|e| TemporalError::Other(e.to_string()))?;
 

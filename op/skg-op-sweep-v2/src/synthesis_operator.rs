@@ -197,7 +197,7 @@ impl<P: Provider> SynthesisOperator<P> {
 
 #[async_trait]
 impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
-    async fn execute(&self, input: OperatorInput, _caps: &layer0::dispatch::Capabilities) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
         let start = Instant::now();
         let mut total_tokens_in: u64 = 0;
         let mut total_tokens_out: u64 = 0;
@@ -567,7 +567,7 @@ mod tests {
         let op = SynthesisOperator::new(provider, Arc::new(MockState), SynthesisConfig::default());
 
         let input = OperatorInput::new(Content::text(synthesis_input_json(2)), TriggerType::Task);
-        let output = op.execute(input, &layer0::dispatch::Capabilities::none()).await.expect("execute should succeed");
+        let output = op.execute(input).await.expect("execute should succeed");
 
         let text = output.message.as_text().expect("output should be text");
         let report: SynthesisReport =
@@ -596,7 +596,7 @@ mod tests {
         let op = SynthesisOperator::new(provider, Arc::new(MockState), SynthesisConfig::default());
 
         let input = OperatorInput::new(Content::text(synthesis_input_json(2)), TriggerType::Task);
-        let output = op.execute(input, &layer0::dispatch::Capabilities::none()).await.expect("execute should succeed");
+        let output = op.execute(input).await.expect("execute should succeed");
 
         let text = output.message.as_text().expect("output should be text");
         let report: SynthesisReport =
@@ -637,7 +637,7 @@ mod tests {
         let op = SynthesisOperator::new(provider, Arc::new(MockState), config);
 
         let input = OperatorInput::new(Content::text(synthesis_input_json(2)), TriggerType::Task);
-        let output = op.execute(input, &layer0::dispatch::Capabilities::none()).await.expect("execute should succeed");
+        let output = op.execute(input).await.expect("execute should succeed");
 
         let text = output.message.as_text().expect("output should be text");
         let report: SynthesisReport =

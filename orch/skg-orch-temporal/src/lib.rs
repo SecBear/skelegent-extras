@@ -28,6 +28,7 @@ pub use config::{RetryPolicy, TemporalConfig};
 
 use async_trait::async_trait;
 use client::{MockTemporalClient, TemporalClient, TemporalError};
+use layer0::dispatch::Dispatcher;
 use layer0::effect::SignalPayload;
 use layer0::error::OrchError;
 use layer0::id::{OperatorId, WorkflowId};
@@ -128,17 +129,15 @@ impl TemporalOrch {
 // ── Orchestrator impl ──────────────────────────────────────────────────────
 
 #[async_trait]
-impl Orchestrator for TemporalOrch {
+impl Dispatcher for TemporalOrch {
     async fn dispatch(
         &self,
         operator: &OperatorId,
         input: OperatorInput,
     ) -> Result<OperatorOutput, OrchError> {
-        // Serialise input for the client abstraction layer.
         let bytes = serde_json::to_vec(&input)
             .map_err(|e| OrchError::DispatchFailed(format!("serialization: {e}")))?;
 
-        // Dispatch through the client (mock or real).
         let result_bytes = self
             .client
             .execute_activity(operator.as_str(), bytes)
@@ -148,10 +147,13 @@ impl Orchestrator for TemporalOrch {
                 other => OrchError::DispatchFailed(other.to_string()),
             })?;
 
-        // Deserialise the response.
         serde_json::from_slice(&result_bytes)
             .map_err(|e| OrchError::DispatchFailed(format!("deserialization: {e}")))
     }
+}
+
+#[async_trait]
+impl Orchestrator for TemporalOrch {
 
     async fn dispatch_many(
         &self,

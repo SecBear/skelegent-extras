@@ -80,7 +80,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use layer0::{
-        effect::SignalPayload, ExitReason, OrchError, QueryPayload, WorkflowId,
+        effect::SignalPayload, ExitReason, OrchError, QueryPayload, WorkflowId, dispatch::Dispatcher,
     };
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
@@ -99,7 +99,7 @@ mod tests {
     struct EchoOrchestrator;
 
     #[async_trait]
-    impl Orchestrator for EchoOrchestrator {
+    impl Dispatcher for EchoOrchestrator {
         async fn dispatch(
             &self,
             _operator: &OperatorId,
@@ -111,7 +111,10 @@ mod tests {
                             out
                         })
         }
+    }
 
+    #[async_trait]
+    impl Orchestrator for EchoOrchestrator {
         async fn dispatch_many(
             &self,
             tasks: Vec<(OperatorId, OperatorInput)>,
@@ -146,7 +149,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Orchestrator for FixedOrchestrator {
+    impl Dispatcher for FixedOrchestrator {
         async fn dispatch(
             &self,
             _operator: &OperatorId,
@@ -158,7 +161,10 @@ mod tests {
                             out
                         })
         }
+    }
 
+    #[async_trait]
+    impl Orchestrator for FixedOrchestrator {
         async fn dispatch_many(
             &self,
             tasks: Vec<(OperatorId, OperatorInput)>,

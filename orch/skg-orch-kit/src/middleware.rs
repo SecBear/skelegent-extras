@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use layer0::{
     effect::SignalPayload, OperatorId, Effect, OperatorInput, OperatorOutput, OrchError,
-    Orchestrator, QueryPayload, WorkflowId,
+    Orchestrator, QueryPayload, WorkflowId, dispatch::Dispatcher,
 };
 use std::sync::Arc;
 
@@ -58,7 +58,7 @@ impl MiddlewareOrchestrator {
 }
 
 #[async_trait]
-impl Orchestrator for MiddlewareOrchestrator {
+impl Dispatcher for MiddlewareOrchestrator {
     async fn dispatch(
         &self,
         operator: &OperatorId,
@@ -68,7 +68,10 @@ impl Orchestrator for MiddlewareOrchestrator {
         output.effects = self.apply_middlewares(output.effects);
         Ok(output)
     }
+}
 
+#[async_trait]
+impl Orchestrator for MiddlewareOrchestrator {
     async fn dispatch_many(
         &self,
         tasks: Vec<(OperatorId, OperatorInput)>,
@@ -105,7 +108,7 @@ impl Orchestrator for MiddlewareOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use layer0::{operator::TriggerType, Content, ExitReason, Scope};
+    use layer0::{operator::TriggerType, Content, ExitReason, Scope, dispatch::Dispatcher};
 
     /// Orchestrator that returns a fixed set of effects.
     struct EffectOrchestrator {
@@ -113,7 +116,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Orchestrator for EffectOrchestrator {
+    impl Dispatcher for EffectOrchestrator {
         async fn dispatch(
             &self,
             _operator: &OperatorId,
@@ -125,7 +128,10 @@ mod tests {
                             out
                         })
         }
+    }
 
+    #[async_trait]
+    impl Orchestrator for EffectOrchestrator {
         async fn dispatch_many(
             &self,
             tasks: Vec<(OperatorId, OperatorInput)>,

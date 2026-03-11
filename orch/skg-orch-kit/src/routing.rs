@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use layer0::{
     effect::SignalPayload, OperatorId, OperatorInput, OperatorOutput, OrchError, Orchestrator,
-    QueryPayload, WorkflowId,
+    QueryPayload, WorkflowId, dispatch::Dispatcher,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -66,7 +66,7 @@ impl RoutingOrchestrator {
 }
 
 #[async_trait]
-impl Orchestrator for RoutingOrchestrator {
+impl Dispatcher for RoutingOrchestrator {
     async fn dispatch(
         &self,
         operator: &OperatorId,
@@ -74,7 +74,10 @@ impl Orchestrator for RoutingOrchestrator {
     ) -> Result<OperatorOutput, OrchError> {
         self.resolve(operator).dispatch(operator, input).await
     }
+}
 
+#[async_trait]
+impl Orchestrator for RoutingOrchestrator {
     async fn dispatch_many(
         &self,
         tasks: Vec<(OperatorId, OperatorInput)>,
@@ -106,7 +109,7 @@ impl Orchestrator for RoutingOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use layer0::{operator::TriggerType, Content, ExitReason};
+    use layer0::{operator::TriggerType, Content, ExitReason, dispatch::Dispatcher};
     use std::sync::Mutex;
 
     /// Mock orchestrator that records the operator name for every dispatch it receives.
@@ -122,7 +125,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Orchestrator for RecordingOrchestrator {
+    impl Dispatcher for RecordingOrchestrator {
         async fn dispatch(
             &self,
             operator: &OperatorId,
@@ -131,7 +134,10 @@ mod tests {
             self.dispatched.lock().unwrap().push(operator.as_str().to_owned());
             Ok(OperatorOutput::new(Content::text("ok"), ExitReason::Complete))
         }
+    }
 
+    #[async_trait]
+    impl Orchestrator for RecordingOrchestrator {
         async fn dispatch_many(
             &self,
             tasks: Vec<(OperatorId, OperatorInput)>,

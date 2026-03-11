@@ -387,7 +387,7 @@ impl<B: BudgetPolicy> SweepCycleOperator<B> {
 
 #[async_trait]
 impl<B: BudgetPolicy + 'static> Operator for SweepCycleOperator<B> {
-    async fn execute(&self, input: OperatorInput, _caps: &layer0::dispatch::Capabilities) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
         let text = input.message.as_text().ok_or_else(|| {
             OperatorError::NonRetryable(
                 "SweepCycleOperator: input.message must be JSON text".into(),
@@ -435,6 +435,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    use layer0::dispatch::Dispatcher;
     use async_trait::async_trait;
     use layer0::effect::SignalPayload;
     use layer0::orchestrator::QueryPayload;
@@ -541,7 +542,8 @@ mod tests {
     }
 
     #[async_trait]
-    impl Orchestrator for MockOrchestrator {
+    #[async_trait::async_trait]
+    impl layer0::dispatch::Dispatcher for MockOrchestrator {
         async fn dispatch(
             &self,
             operator: &OperatorId,
@@ -558,7 +560,10 @@ mod tests {
                 ExitReason::Complete,
             ))
         }
+    }
 
+    #[async_trait::async_trait]
+    impl Orchestrator for MockOrchestrator {
         async fn dispatch_many(
             &self,
             tasks: Vec<(OperatorId, OperatorInput)>,

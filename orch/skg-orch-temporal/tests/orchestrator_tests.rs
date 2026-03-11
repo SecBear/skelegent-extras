@@ -2,6 +2,7 @@
 //!
 //! All tests run with default features only (no native deps, no cmake).
 
+use layer0::dispatch::Dispatcher;
 use layer0::content::Content;
 use layer0::effect::SignalPayload;
 use layer0::error::{OperatorError, OrchError};
@@ -152,7 +153,7 @@ struct AlwaysFailOperator;
 
 #[async_trait::async_trait]
 impl Operator for AlwaysFailOperator {
-    async fn execute(&self, _input: OperatorInput, _caps: &layer0::dispatch::Capabilities) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, _input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
         Err(OperatorError::NonRetryable("intentional failure".into()))
     }
 }

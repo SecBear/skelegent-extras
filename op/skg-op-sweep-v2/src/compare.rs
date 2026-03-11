@@ -190,7 +190,7 @@ impl<P: Provider> CompareOperator<P> {
 
 #[async_trait]
 impl<P: Provider + 'static> Operator for CompareOperator<P> {
-    async fn execute(&self, input: OperatorInput, _caps: &layer0::dispatch::Capabilities) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
         let start = Instant::now();
 
         // Parse typed input.
@@ -444,7 +444,7 @@ mod tests {
             Content::text(&input_json),
             layer0::operator::TriggerType::Task,
         );
-        let output = op.execute(input, &layer0::dispatch::Capabilities::none()).await.unwrap();
+        let output = op.execute(input).await.unwrap();
 
         assert_eq!(output.exit_reason, ExitReason::Complete);
         let result: SweepVerdict =
