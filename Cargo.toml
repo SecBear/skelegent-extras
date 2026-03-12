@@ -6,6 +6,7 @@ members = [
   "orch/skg-orch-sweep",
   "orch/skg-orch-kit",
   "orch/skg-orch-temporal",
+  "orch/skg-orch-sqlite",
   "state/skg-state-sqlite",
   "state/skg-state-cozo",
   "effects/skg-effects-git",
