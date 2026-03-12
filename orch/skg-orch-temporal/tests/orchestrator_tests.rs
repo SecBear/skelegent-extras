@@ -1,22 +1,32 @@
 //! Integration tests for `skg-orch-temporal`.
 //!
-//! All tests run with default features only (no native deps, no cmake).
+//! Default-feature tests stay mock-backed and dependency-light. Feature-gated
+//! checks for `temporal-sdk` are compile-oriented unless a real Temporal server
+//! is provided separately.
 
-use layer0::dispatch::Dispatcher;
 use layer0::content::Content;
+use layer0::dispatch::Dispatcher;
 use layer0::effect::SignalPayload;
 use layer0::error::{OperatorError, OrchError};
 use layer0::id::{OperatorId, WorkflowId};
 use layer0::operator::{ExitReason, Operator, OperatorInput, OperatorOutput, TriggerType};
-use skg_effects_core::{Queryable, QueryPayload, Signalable};
 use layer0::test_utils::EchoOperator;
+use skg_effects_core::{QueryPayload, Queryable, Signalable};
 use skg_orch_temporal::{RetryPolicy, TemporalConfig, TemporalOrch};
+use skg_run_core::{ResumeInput, RunController, RunStarter, RunStatus, RunView, WaitReason};
 use std::sync::Arc;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn simple_input(msg: &str) -> OperatorInput {
     OperatorInput::new(Content::text(msg), TriggerType::User)
+}
+
+fn mock_run_start_input(ticket: u64) -> serde_json::Value {
+    serde_json::json!({
+        "operator_id": "approval",
+        "input": { "ticket": ticket }
+    })
 }
 
 // ── Config tests ─────────────────────────────────────────────────────────────
@@ -28,6 +38,7 @@ fn temporal_config_defaults() {
     assert_eq!(cfg.namespace, "default");
     assert_eq!(cfg.task_queue, "skg-worker");
     assert_eq!(cfg.identity, "");
+    assert_eq!(cfg.workflow_type, "skg.generic.durable-run");
 }
 
 #[test]
@@ -46,6 +57,7 @@ fn temporal_config_serde_round_trip() {
         namespace: "prod".to_string(),
         task_queue: "fast-queue".to_string(),
         identity: "worker-1".to_string(),
+        workflow_type: "company.generic.durable-run".to_string(),
     };
     let json = serde_json::to_string(&original).expect("serialize TemporalConfig");
     let recovered: TemporalConfig = serde_json::from_str(&json).expect("deserialize TemporalConfig");
@@ -53,6 +65,7 @@ fn temporal_config_serde_round_trip() {
     assert_eq!(recovered.namespace, original.namespace);
     assert_eq!(recovered.task_queue, original.task_queue);
     assert_eq!(recovered.identity, original.identity);
+    assert_eq!(recovered.workflow_type, original.workflow_type);
 }
 
 #[test]
@@ -259,8 +272,121 @@ fn config_accessor_returns_configured_values() {
         namespace: "staging".to_string(),
         task_queue: "staging-queue".to_string(),
         identity: "test-worker".to_string(),
+        workflow_type: "staging.generic.durable-run".to_string(),
     };
     let orch = TemporalOrch::new(cfg.clone());
     assert_eq!(orch.config().server_url, "remote:7233");
     assert_eq!(orch.config().namespace, "staging");
+    assert_eq!(orch.config().workflow_type, "staging.generic.durable-run");
+}
+
+// ── Durable run control tests ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn start_run_get_run_and_query_current_state() {
+    let orch = TemporalOrch::new(TemporalConfig::default());
+    let run_id = RunStarter::start_run(&orch, mock_run_start_input(7))
+        .await
+        .expect("start durable run");
+
+    let run = RunController::get_run(&orch, &run_id)
+        .await
+        .expect("fetch waiting run");
+    match &run {
+        RunView::Waiting { wait_reason, .. } => {
+            assert_eq!(wait_reason, &WaitReason::ExternalInput);
+        }
+        other => panic!("expected waiting run, got {other:?}"),
+    }
+    assert_eq!(run.status(), RunStatus::Waiting);
+
+    let queried = orch
+        .query(
+            &WorkflowId::new(run_id.as_str()),
+            QueryPayload::new("run-view", serde_json::json!({})),
+        )
+        .await
+        .expect("query current run view");
+    assert_eq!(queried["status"], serde_json::json!("waiting"));
+    assert_eq!(queried["run_id"], serde_json::json!(run_id.as_str()));
+    // The portable RunId remains the external identifier on the mock path too;
+    // callers never see a separate Temporal server-assigned run ID.
+    assert_eq!(WorkflowId::new(run_id.as_str()).as_str(), run_id.as_str());
+}
+
+#[tokio::test]
+async fn signal_run_is_distinct_from_resume_run() {
+    let orch = TemporalOrch::new(TemporalConfig::default());
+    let run_id = RunStarter::start_run(&orch, mock_run_start_input(8))
+        .await
+        .expect("start durable run");
+
+    let waiting = orch.get_run(&run_id).await.expect("fetch waiting run");
+    let wait_point = match waiting {
+        RunView::Waiting {
+            wait_point,
+            wait_reason,
+            ..
+        } => {
+            assert_eq!(wait_reason, WaitReason::ExternalInput);
+            wait_point
+        }
+        other => panic!("expected waiting run before signal, got {other:?}"),
+    };
+
+    orch.signal_run(&run_id, serde_json::json!({ "kind": "poke" }))
+        .await
+        .expect("send durable signal");
+
+    let after_signal = orch.get_run(&run_id).await.expect("fetch signalled run");
+    match after_signal {
+        RunView::Waiting {
+            wait_point: active_wait,
+            wait_reason,
+            ..
+        } => {
+            assert_eq!(active_wait, wait_point);
+            assert_eq!(wait_reason, WaitReason::ExternalInput);
+        }
+        other => panic!("signal must not resume waiting run, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn resume_waiting_run_completes_with_resume_payload() {
+    let orch = TemporalOrch::new(TemporalConfig::default());
+    let run_id = RunStarter::start_run(&orch, mock_run_start_input(9))
+        .await
+        .expect("start durable run");
+
+    let waiting = orch.get_run(&run_id).await.expect("fetch waiting run");
+    let wait_point = match waiting {
+        RunView::Waiting { wait_point, .. } => wait_point,
+        other => panic!("expected waiting run before resume, got {other:?}"),
+    };
+
+    orch.resume_run(
+        &run_id,
+        &wait_point,
+        ResumeInput::new(serde_json::json!({ "approved": true })),
+    )
+    .await
+    .expect("resume waiting run");
+
+    let completed = orch.get_run(&run_id).await.expect("fetch completed run");
+    match completed {
+        RunView::Completed { result, .. } => {
+            assert_eq!(result["source"], serde_json::json!("resume"));
+            assert_eq!(result["resume"], serde_json::json!({ "approved": true }));
+            assert_eq!(result["start"]["input"]["ticket"], serde_json::json!(9));
+        }
+        other => panic!("expected completed run after resume, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "temporal-sdk")]
+#[test]
+fn temporal_sdk_config_can_describe_generic_durable_run_workflow() {
+    let cfg = TemporalConfig::default();
+    assert!(!cfg.workflow_type.is_empty());
 }

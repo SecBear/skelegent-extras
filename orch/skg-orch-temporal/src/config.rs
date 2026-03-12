@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemporalConfig {
     /// gRPC address of the Temporal server (e.g. `"localhost:7233"`).
+    ///
+    /// `TemporalOrch::connect()` accepts either a bare host:port pair or a full
+    /// URL such as `http://localhost:7233`.
     pub server_url: String,
     /// Temporal namespace to use (e.g. `"default"`).
     pub namespace: String,
@@ -13,6 +16,15 @@ pub struct TemporalConfig {
     pub task_queue: String,
     /// Identity string sent to Temporal for observability and audit purposes.
     pub identity: String,
+    /// Workflow type name for the deployed generic durable-run workflow.
+    ///
+    /// Relevant only when the crate is built with `temporal-sdk` and callers
+    /// opt into the real backend via `TemporalOrch::connect()`. In that backend,
+    /// the portable `RunId` is used as the Temporal workflow ID for this workflow
+    /// type; Temporal's server-assigned run ID remains internal. The workflow
+    /// must expose the expected run-view query, control signal, and resume
+    /// update handlers.
+    pub workflow_type: String,
 }
 
 impl Default for TemporalConfig {
@@ -23,6 +35,7 @@ impl Default for TemporalConfig {
             namespace: "default".to_string(),
             task_queue: "skg-worker".to_string(),
             identity: String::new(),
+            workflow_type: "skg.generic.durable-run".to_string(),
         }
     }
 }

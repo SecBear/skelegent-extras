@@ -9,20 +9,25 @@ description = "Temporal-backed Orchestrator implementation for skelegent"
 
 [features]
 default = []
-# Gate the real temporal-sdk-core dependency behind this feature.
-# Without it, TemporalOrch uses a mock client suitable for testing.
+# Compiles the real Temporal client path; `TemporalOrch::connect()` opts into it.
+# `TemporalOrch::new()` remains mock-backed even when this feature is enabled.
 # Requires cmake, protobuf compiler in build environment.
-temporal-sdk = ["dep:tonic"]
+temporal-sdk = ["dep:temporalio-client", "dep:temporalio-common", "dep:tonic", "dep:url", "dep:uuid"]
 
 [dependencies]
 layer0 = { path = "../../../skelegent/layer0", version = "0.4.0" }
 skg-effects-core = { path = "../../../skelegent/effects/skg-effects-core", version = "0.4.1" }
+skg-run-core = { path = "../../../skelegent/orch/skg-run-core", version = "0.4.1" }
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+temporalio-client = { version = "0.1.0", optional = true }
+temporalio-common = { version = "0.1.0", optional = true }
 tonic = { version = "0.12", optional = true }
+url = { version = "2", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
 layer0 = { path = "../../../skelegent/layer0", features = ["test-utils"], version = "0.4.0" }
