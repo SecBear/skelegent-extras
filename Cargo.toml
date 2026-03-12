@@ -13,6 +13,7 @@ members = [
   "auth/skg-auth-pi",
   "auth/skg-auth-omp",
   "client/skg-client-parallel",
+  "run/skg-run-sqlite",
 ]
 
 [workspace.package]
