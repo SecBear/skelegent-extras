@@ -7,8 +7,8 @@
 //! - [`dispatch_typed`] — type-safe operator dispatch with automatic serde
 //! - [`BudgetTracker`] / [`BudgetPolicy`] — generic budget enforcement with pluggable policies
 //! - [`CompositionTrace`] — span-based tracing with cycle detection for nested dispatch
-//! - [`EffectMiddleware`] / [`MiddlewareOrchestrator`] — intercept and transform effects at the dispatch boundary
-//! - [`RoutingOrchestrator`] — route dispatches to backend orchestrators by operator name
+//! - [`EffectMiddleware`] / [`MiddlewareDispatcher`] — intercept and transform effects at the dispatch boundary
+//! - [`RoutingDispatcher`] — route dispatches to backend dispatchers by operator name
 //!
 //! [`StateStore`]: layer0::StateStore
 
@@ -22,8 +22,8 @@ pub mod trace;
 pub mod routing;
 
 pub use budget::{BudgetDecision, BudgetPolicy, BudgetTracker};
-pub use dispatch::{dispatch_typed, DispatchError};
-pub use middleware::{EffectMiddleware, MiddlewareOrchestrator};
-pub use routing::RoutingOrchestrator;
+pub use dispatch::{dispatch_many, dispatch_typed, DispatchError};
+pub use middleware::{EffectMiddleware, MiddlewareDispatcher};
+pub use routing::RoutingDispatcher;
 pub use scoped_state::{ScopedState, ScopedStateView};
 pub use trace::CompositionTrace;

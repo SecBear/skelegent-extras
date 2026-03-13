@@ -1,7 +1,7 @@
 //! Internal Temporal client abstraction.
 //!
 //! This module is crate-private. Consumers interact with the Temporal backend
-//! exclusively through the [`layer0::Orchestrator`] trait, never through these
+//! exclusively through the [`layer0::Dispatcher`] trait, never through these
 //! types directly.
 
 use async_trait::async_trait;
@@ -38,7 +38,7 @@ pub(crate) enum TemporalError {
 
 /// Internal abstraction over Temporal server communication.
 ///
-/// NOT exported — consumers use the `Orchestrator` trait from layer0.
+/// NOT exported — consumers use the `Dispatcher` trait from layer0.
 /// Having this trait makes it possible to swap in a `MockTemporalClient`
 /// for tests without any native dependencies.
 #[async_trait]
@@ -214,7 +214,7 @@ impl GrpcTemporalClient {
     pub(crate) async fn connect(
         config: &super::config::TemporalConfig,
     ) -> Result<Self, TemporalError> {
-        let channel = tonic::transport::Channel::from_shared(config.server_url.clone())
+        let channel = tonic::transport::Channel::from_shared(config.normalized_server_url())
             .map_err(|e| TemporalError::ConnectionFailed(e.to_string()))?
             .connect()
             .await

@@ -15,7 +15,7 @@
 //!   for partition-isolated reads/writes.
 //!
 //! - **Composition** ([`run_sweep_cycle`]) is a plain async function that sequences
-//!   operator dispatches through an [`Orchestrator`](layer0::Orchestrator), using
+//!   operator dispatches through a [`Dispatcher`](layer0::dispatch::Dispatcher), using
 //!   [`BudgetTracker`](skg_orch_kit::BudgetTracker) for cost enforcement and
 //!   [`CompositionTrace`](skg_orch_kit::CompositionTrace) for cycle detection.
 //!
@@ -32,10 +32,10 @@
 //! use skg_op_sweep::cycle::run_sweep_cycle;
 //!
 //! // 1. Create operators with ScopedState + Provider.
-//! // 2. Register them on an Orchestrator.
-//! // 3. Register ResearchOperator + CompareOperator on an Orchestrator.
+//! // 2. Register them on a Dispatcher.
+//! // 3. Register ResearchOperator + CompareOperator on a Dispatcher.
 //! // 4. Dispatch ResearchOperator, feed results into CompareOperator.
-//! // 5. Or call run_sweep_cycle(&orch, &state, &budget, &trace, ...).await
+//! // 5. Or call run_sweep_cycle(&dispatcher, &state, &budget, &trace, ...).await
 
 pub mod compare;
 pub mod cost;

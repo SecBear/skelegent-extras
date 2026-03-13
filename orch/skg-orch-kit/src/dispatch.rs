@@ -1,7 +1,9 @@
 //! Type-safe operator dispatch with automatic serialization.
 
+use std::sync::Arc;
+use layer0::dispatch::Dispatcher;
 use layer0::{
-    operator::TriggerType, OperatorId, Content, OperatorInput, OperatorOutput, OrchError, Orchestrator,
+    operator::TriggerType, OperatorId, Content, OperatorInput, OperatorOutput, OrchError,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
@@ -18,9 +20,9 @@ pub enum DispatchError {
     #[error("output deserialization failed: {0}")]
     DeserializeOutput(String),
 
-    /// The underlying orchestrator dispatch failed.
+    /// The underlying dispatch failed.
     #[error("dispatch failed: {0}")]
-    Orchestrator(#[from] OrchError),
+    Dispatch(#[from] OrchError),
 }
 
 /// Dispatch an operator with typed input and output.
@@ -40,9 +42,9 @@ pub enum DispatchError {
 ///
 /// Returns [`DispatchError::SerializeInput`] if `input` cannot be serialized,
 /// [`DispatchError::DeserializeOutput`] if the output text cannot be deserialized
-/// into `O`, or [`DispatchError::Orchestrator`] if the underlying dispatch fails.
+/// into `O`, or [`DispatchError::Dispatch`] if the underlying dispatch fails.
 pub async fn dispatch_typed<I, O>(
-    orch: &dyn Orchestrator,
+    dispatcher: &dyn Dispatcher,
     operator: &OperatorId,
     input: I,
     trigger: TriggerType,
@@ -60,7 +62,7 @@ where
     let mut op_input = OperatorInput::new(Content::text(json_text), trigger);
     op_input.metadata = metadata;
 
-    let output = orch.dispatch(operator, op_input).await?;
+    let output = dispatcher.dispatch(operator, op_input).await?;
 
     let text = output
         .message
@@ -75,12 +77,39 @@ where
     Ok((typed, output))
 }
 
+/// Dispatch multiple operator invocations concurrently.
+///
+/// Spawns one `tokio::spawn` per task for true parallelism. Returns results
+/// in the same order as the input tasks. Individual tasks may fail independently.
+///
+/// This is the standalone replacement for the removed `Orchestrator::dispatch_many()` method.
+pub async fn dispatch_many(
+    dispatcher: Arc<dyn Dispatcher>,
+    tasks: Vec<(OperatorId, OperatorInput)>,
+) -> Vec<Result<OperatorOutput, OrchError>> {
+    let mut handles: Vec<tokio::task::JoinHandle<Result<OperatorOutput, OrchError>>> = Vec::with_capacity(tasks.len());
+    for (operator_id, input) in tasks {
+        let d = Arc::clone(&dispatcher);
+        handles.push(tokio::spawn(async move {
+            d.dispatch(&operator_id, input).await
+        }));
+    }
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => results.push(Err(OrchError::DispatchFailed(e.to_string()))),
+        }
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
     use layer0::{
-        effect::SignalPayload, ExitReason, OrchError, QueryPayload, WorkflowId,
+        ExitReason, OrchError, dispatch::Dispatcher,
     };
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
@@ -95,11 +124,11 @@ mod tests {
         answer: String,
     }
 
-    /// Mock orchestrator that echoes input text back as output.
-    struct EchoOrchestrator;
+    /// Mock dispatcher that echoes input text back as output.
+    struct EchoDispatcher;
 
     #[async_trait]
-    impl Orchestrator for EchoOrchestrator {
+    impl Dispatcher for EchoDispatcher {
         async fn dispatch(
             &self,
             _operator: &OperatorId,
@@ -111,42 +140,15 @@ mod tests {
                             out
                         })
         }
-
-        async fn dispatch_many(
-            &self,
-            tasks: Vec<(OperatorId, OperatorInput)>,
-        ) -> Vec<Result<OperatorOutput, OrchError>> {
-            let mut results = Vec::new();
-            for (operator, input) in tasks {
-                results.push(self.dispatch(&operator, input).await);
-            }
-            results
-        }
-
-        async fn signal(
-            &self,
-            _target: &WorkflowId,
-            _signal: SignalPayload,
-        ) -> Result<(), OrchError> {
-            Ok(())
-        }
-
-        async fn query(
-            &self,
-            _target: &WorkflowId,
-            _query: QueryPayload,
-        ) -> Result<serde_json::Value, OrchError> {
-            Ok(serde_json::Value::Null)
-        }
     }
 
-    /// Mock orchestrator that returns a fixed JSON response.
-    struct FixedOrchestrator {
+    /// Mock dispatcher that returns a fixed JSON response.
+    struct FixedDispatcher {
         response: String,
     }
 
     #[async_trait]
-    impl Orchestrator for FixedOrchestrator {
+    impl Dispatcher for FixedDispatcher {
         async fn dispatch(
             &self,
             _operator: &OperatorId,
@@ -158,38 +160,11 @@ mod tests {
                             out
                         })
         }
-
-        async fn dispatch_many(
-            &self,
-            tasks: Vec<(OperatorId, OperatorInput)>,
-        ) -> Vec<Result<OperatorOutput, OrchError>> {
-            let mut results = Vec::new();
-            for (operator, input) in tasks {
-                results.push(self.dispatch(&operator, input).await);
-            }
-            results
-        }
-
-        async fn signal(
-            &self,
-            _target: &WorkflowId,
-            _signal: SignalPayload,
-        ) -> Result<(), OrchError> {
-            Ok(())
-        }
-
-        async fn query(
-            &self,
-            _target: &WorkflowId,
-            _query: QueryPayload,
-        ) -> Result<serde_json::Value, OrchError> {
-            Ok(serde_json::Value::Null)
-        }
     }
 
     #[tokio::test]
     async fn typed_roundtrip_with_echo() {
-        let orch = Arc::new(EchoOrchestrator);
+        let orch = Arc::new(EchoDispatcher);
         let operator = OperatorId::new("test-agent");
         let input = TestInput {
             question: "what is 2+2?".into(),
@@ -208,7 +183,7 @@ mod tests {
 
     #[tokio::test]
     async fn typed_roundtrip_with_fixed_response() {
-        let orch = Arc::new(FixedOrchestrator {
+        let orch = Arc::new(FixedDispatcher {
             response: r#"{"answer":"four"}"#.into(),
         });
         let operator = OperatorId::new("test-agent");
@@ -234,7 +209,7 @@ mod tests {
 
     #[tokio::test]
     async fn deserialization_failure() {
-        let orch = Arc::new(FixedOrchestrator {
+        let orch = Arc::new(FixedDispatcher {
             response: "not valid json for TestOutput".into(),
         });
         let operator = OperatorId::new("test-agent");
@@ -255,7 +230,7 @@ mod tests {
     #[tokio::test]
     async fn metadata_carries_structured_input() {
         // Verify that the metadata field carries the full structured input
-        let orch = Arc::new(EchoOrchestrator);
+        let orch = Arc::new(EchoDispatcher);
         let operator = OperatorId::new("test-agent");
         let input = TestInput {
             question: "test".into(),

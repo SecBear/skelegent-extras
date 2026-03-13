@@ -1,14 +1,17 @@
 //! [`CozoStore`]: [`StateStore`] implementation backed by [`CozoEngine`].
 //!
-//! # v1 Implementation Notes
-//!
-//! - `search` performs basic substring matching on keys and JSON-encoded values.
-//!   Full hybrid retrieval (HNSW + BM25 + Datalog graph expansion + RRF) is
-//!   planned for v2 when the `cozo` feature is fully activated.
-//! - `clear_transient` is a no-op in v1; transient entries share the durable
-//!   store. A dedicated transient table is planned for v2.
-//! - `read_hinted` and `write_hinted` delegate to `read`/`write`, ignoring
-//!   advisory hints. Backends may honour hints in future revisions.
+//! - `search` uses the `kv:fts_val` FTS index (BM25-ranked) on the `cozo` backend,
+//!   or case-insensitive substring matching on the HashMap backend.
+//! - `vector_search` queries the `node:emb_idx` HNSW index (cosine distance).
+//! - `hybrid_search` runs FTS and HNSW in parallel, then fuses results via
+//!   Reciprocal Rank Fusion (RRF).
+//! - Graph edges are stored in the `edge` relation; `traverse` implements
+//!   level-batched BFS using Datalog `is_in` predicates.
+//! - Transient entries are routed to a dedicated `kv_transient` relation (cozo)
+//!   or an in-memory `transient` HashMap (no-cozo backend), and purged by
+//!   [`CozoStore::clear_transient`] at turn boundaries.
+//! - `write_hinted` honours `Lifetime::Transient`; all other lifetimes fall
+//!   through to `write`.
 
 #[cfg(not(feature = "cozo"))]
 use crate::engine::EdgeRecord;
@@ -19,8 +22,10 @@ use crate::scope::{composite_key, extract_key};
 use async_trait::async_trait;
 use layer0::effect::Scope;
 use layer0::error::StateError;
-use layer0::state::{MemoryLink, SearchOptions, SearchResult, StateStore, StoreOptions};
-use std::collections::{HashSet, VecDeque};
+use layer0::state::{Lifetime, MemoryLink, SearchOptions, SearchResult, StateStore, StoreOptions};
+#[cfg(not(feature = "cozo"))]
+use std::collections::VecDeque;
+use std::collections::HashSet;
 use tracing::instrument;
 
 /// CozoDB-backed [`StateStore`] with graph and hybrid search support.
@@ -57,6 +62,13 @@ use tracing::instrument;
 /// [`Arc`]: std::sync::Arc
 pub struct CozoStore {
     engine: CozoEngine,
+    /// In-memory scratchpad for `Lifetime::Transient` writes.
+    ///
+    /// For the no-`cozo` backend this is the sole transient store.
+    /// For the CozoDB backend, transient writes go to the `kv_transient`
+    /// relation; this field is not used by that backend.
+    #[cfg(not(feature = "cozo"))]
+    transient: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
 
 impl CozoStore {
@@ -65,7 +77,11 @@ impl CozoStore {
     /// The engine should already have its schema initialized via
     /// [`CozoEngine::ensure_schema`].
     pub fn new(engine: CozoEngine) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            #[cfg(not(feature = "cozo"))]
+            transient: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+        }
     }
 
     /// Create an in-memory `CozoStore`.
@@ -79,7 +95,11 @@ impl CozoStore {
     pub fn memory() -> Result<Self, StateError> {
         let engine = CozoEngine::memory().map_err(StateError::from)?;
         engine.ensure_schema().map_err(StateError::from)?;
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            #[cfg(not(feature = "cozo"))]
+            transient: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+        })
     }
 
     /// Open a persistent [`CozoStore`] at the given filesystem path.
@@ -113,6 +133,187 @@ impl std::fmt::Debug for CozoStore {
     }
 }
 
+// ── Tier 2: CozoStore-only methods ───────────────────────────────────────────
+
+/// Stub impl for the HashMap backend: vector operations are not supported.
+#[cfg(not(feature = "cozo"))]
+impl CozoStore {
+    /// Write a node with embedding vector (Tier 2 — CozoStore only).
+    ///
+    /// The HashMap backend does not support HNSW. Returns [`StateError::WriteFailed`].
+    pub async fn write_node(
+        &self,
+        _scope: &Scope,
+        _key: &str,
+        _data: serde_json::Value,
+        _node_type: &str,
+        _salience: f64,
+        _embedding: &[f32],
+    ) -> Result<(), StateError> {
+        Err(StateError::WriteFailed(
+            "HNSW requires cozo feature".to_string(),
+        ))
+    }
+
+    /// Vector similarity search using HNSW index (Tier 2 — CozoStore only).
+    ///
+    /// The HashMap backend does not support HNSW. Returns [`StateError::WriteFailed`].
+    pub async fn vector_search(
+        &self,
+        _scope: &Scope,
+        _query_vector: &[f32],
+        _limit: usize,
+    ) -> Result<Vec<SearchResult>, StateError> {
+        Err(StateError::WriteFailed(
+            "HNSW requires cozo feature".to_string(),
+        ))
+    }
+
+    /// Hybrid search combining FTS and HNSW vector search with RRF fusion.
+    ///
+    /// The HashMap backend does not support hybrid search. Returns [`StateError::WriteFailed`].
+    pub async fn hybrid_search(
+        &self,
+        _scope: &Scope,
+        _query_text: &str,
+        _query_vector: &[f32],
+        _limit: usize,
+    ) -> Result<Vec<SearchResult>, StateError> {
+        Err(StateError::WriteFailed(
+            "hybrid search requires cozo feature".to_string(),
+        ))
+    }
+}
+
+/// Helper: build a `BTreeMap<String, DataValue>` from key-value pairs.
+#[cfg(feature = "cozo")]
+macro_rules! cozo_params {
+    ($($key:expr => $val:expr),* $(,)?) => {{
+        let mut m = BTreeMap::<String, DataValue>::new();
+        $( m.insert($key.to_string(), $val); )*
+        m
+    }};
+}
+
+/// Real HNSW impl for the CozoDB backend.
+#[cfg(feature = "cozo")]
+impl CozoStore {
+    /// Write a node with embedding vector (Tier 2 — CozoStore only).
+    ///
+    /// Stores data alongside a 1536-dimensional F32 embedding for HNSW
+    /// similarity search via [`CozoStore::vector_search`].
+    pub async fn write_node(
+        &self,
+        scope: &Scope,
+        key: &str,
+        data: serde_json::Value,
+        node_type: &str,
+        salience: f64,
+        embedding: &[f32],
+    ) -> Result<(), StateError> {
+        let sp = scope_prefix(scope);
+        let data_str = serde_json::to_string(&data)
+            .map_err(|e| StateError::Serialization(e.to_string()))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let emb_vec = DataValue::Vec(Vector::F32(ndarray::Array1::from_vec(
+            embedding.to_vec(),
+        )));
+        let params = cozo_params! {
+            "scope" => DataValue::Str(sp.into()),
+            "key" => DataValue::Str(key.to_string().into()),
+            "data" => DataValue::Str(data_str.into()),
+            "node_type" => DataValue::Str(node_type.to_string().into()),
+            "salience" => DataValue::from(salience),
+            "embedding" => emb_vec,
+            "now" => DataValue::from(now),
+        };
+        self.engine
+            .run_mutation(
+                "?[scope, key, data, node_type, salience, embedding, created_at] <- \
+                [[$scope, $key, $data, $node_type, $salience, $embedding, $now]] \
+                :put node {scope, key => data, node_type, salience, embedding, created_at}",
+                params,
+            )
+            .map_err(StateError::from)?;
+        Ok(())
+    }
+
+    /// Vector similarity search using HNSW index (Tier 2 — CozoStore only).
+    ///
+    /// Returns the `limit` nearest neighbors by cosine distance. Scoped to
+    /// `scope` — results from other scopes are excluded.
+    pub async fn vector_search(
+        &self,
+        scope: &Scope,
+        query_vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, StateError> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        let sp = scope_prefix(scope);
+        let query_dv = DataValue::Vec(Vector::F32(ndarray::Array1::from_vec(
+            query_vector.to_vec(),
+        )));
+        let params = cozo_params! {
+            "scope" => DataValue::Str(sp.into()),
+            "vec" => query_dv,
+            "limit" => DataValue::from(limit as i64),
+        };
+        let q = concat!(
+            "?[key, data, dist] := ",
+            "~node:emb_idx {scope, key, data | query: $vec, k: $limit, ef: 64, bind_distance: dist},",
+            " scope == $scope\n",
+            ":order dist\n",
+            ":limit $limit",
+        );
+        let rows = self
+            .engine
+            .run_query(q, params)
+            .map_err(StateError::from)?;
+        let results: Vec<SearchResult> = rows
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let key = dv_as_string(&row[0])?;
+                let data_str = dv_as_string(&row[1])?;
+                let dist = dv_as_f64(&row[2]).unwrap_or(1.0);
+                // Score: 1 − distance (cosine distance ∈ [0, 2]; 0 = identical).
+                let score = 1.0 - dist;
+                let mut sr = SearchResult::new(key, score);
+                sr.snippet = Some(data_str.chars().take(120).collect());
+                Some(sr)
+            })
+            .collect();
+        Ok(results)
+    }
+
+    /// Hybrid search combining FTS and HNSW vector search with RRF fusion.
+    ///
+    /// Runs FTS text search and HNSW vector search, then fuses results using
+    /// Reciprocal Rank Fusion.
+    pub async fn hybrid_search(
+        &self,
+        scope: &Scope,
+        query_text: &str,
+        query_vector: &[f32],
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, StateError> {
+        use layer0::state::StateStore as _;
+        let fts_results = self.search(scope, query_text, limit).await?;
+        let vector_results = self.vector_search(scope, query_vector, limit).await?;
+        let mut fused = crate::search::rrf_fuse(
+            &[fts_results, vector_results],
+            crate::search::RRF_K,
+        );
+        fused.truncate(limit);
+        Ok(fused)
+    }
+}
+
 // ── HashMap backend (default, no native deps) ─────────────────────────────────
 
 #[cfg(not(feature = "cozo"))]
@@ -125,6 +326,15 @@ impl StateStore for CozoStore {
         key: &str,
     ) -> Result<Option<serde_json::Value>, StateError> {
         let ck = composite_key(scope, key);
+        // Check transient scratchpad first, then durable store.
+        {
+            let t = self.transient.lock().expect("transient lock poisoned");
+            if let Some(raw) = t.get(&ck) {
+                let val: serde_json::Value = serde_json::from_str(raw)
+                    .map_err(|e| StateError::Serialization(e.to_string()))?;
+                return Ok(Some(val));
+            }
+        }
         let inner = self.engine.inner.read().await;
         match inner.kv.get(&ck) {
             None => Ok(None),
@@ -184,8 +394,8 @@ impl StateStore for CozoStore {
     ///
     /// Results are sorted by score (descending). Keys that match both the key
     /// name and the value receive a score of `1.0`; single-field matches
-    /// receive `0.5`. The full hybrid retrieval pipeline (HNSW + BM25 +
-    /// Datalog graph expansion) is planned for v2.
+    /// receive `0.5`. The HashMap backend does not support FTS or HNSW —
+    /// use the `cozo` feature for BM25-ranked FTS and HNSW vector search.
     #[instrument(skip_all, fields(scope = ?scope))]
     async fn search(
         &self,
@@ -243,19 +453,29 @@ impl StateStore for CozoStore {
         scope: &Scope,
         key: &str,
         value: serde_json::Value,
-        _options: &StoreOptions,
+        options: &StoreOptions,
     ) -> Result<(), StateError> {
-        self.write(scope, key, value).await
+        if options.lifetime == Some(Lifetime::Transient) {
+            let ck = composite_key(scope, key);
+            let raw = serde_json::to_string(&value)
+                .map_err(|e| StateError::Serialization(e.to_string()))?;
+            self.transient
+                .lock()
+                .expect("transient lock poisoned")
+                .insert(ck, raw);
+            Ok(())
+        } else {
+            self.write(scope, key, value).await
+        }
     }
 
-    /// No-op in v1.
+    /// Clears all entries written with [`Lifetime::Transient`].
     ///
-    /// CozoDB v1 does not maintain a separate transient table. Entries written
-    /// with [`Lifetime::Transient`] are stored durably and not cleared here.
-    /// A dedicated transient store is planned for v2.
-    ///
-    /// [`Lifetime::Transient`]: layer0::state::Lifetime
-    fn clear_transient(&self) {}
+    /// Called at turn boundaries to discard scratchpad data. Durable entries
+    /// written via `write` or `write_hinted` with other lifetimes are unaffected.
+    fn clear_transient(&self) {
+        self.transient.lock().expect("transient lock poisoned").clear();
+    }
 
     async fn link(&self, scope: &Scope, link: &MemoryLink) -> Result<(), StateError> {
         let scope_pfx = scope_prefix(scope);
@@ -363,17 +583,9 @@ impl StateStore for CozoStore {
 #[cfg(feature = "cozo")]
 use crate::engine::DataValue;
 #[cfg(feature = "cozo")]
-use std::collections::BTreeMap;
-
-/// Helper: build a `BTreeMap<String, DataValue>` from key-value pairs.
+use cozo::Vector;
 #[cfg(feature = "cozo")]
-macro_rules! cozo_params {
-    ($($key:expr => $val:expr),* $(,)?) => {{
-        let mut m = BTreeMap::<String, DataValue>::new();
-        $( m.insert($key.to_string(), $val); )*
-        m
-    }};
-}
+use std::collections::BTreeMap;
 
 /// Extract a `String` from a `DataValue`, returning `None` for non-string values.
 #[cfg(feature = "cozo")]
@@ -382,6 +594,12 @@ fn dv_as_string(dv: &DataValue) -> Option<String> {
         DataValue::Str(s) => Some(s.to_string()),
         _ => None,
     }
+}
+
+/// Extract an `f64` from a `DataValue::Num`, returning `None` for non-numeric values.
+#[cfg(feature = "cozo")]
+fn dv_as_f64(dv: &DataValue) -> Option<f64> {
+    dv.get_float()
 }
 
 #[cfg(feature = "cozo")]
@@ -394,9 +612,30 @@ impl StateStore for CozoStore {
         key: &str,
     ) -> Result<Option<serde_json::Value>, StateError> {
         let sp = scope_prefix(scope);
+        let key_s = key.to_string();
+        // Check transient table first, then durable kv.
+        let t_params = cozo_params! {
+            "scope" => DataValue::Str(sp.clone().into()),
+            "key" => DataValue::Str(key_s.clone().into()),
+        };
+        let t_rows = self
+            .engine
+            .run_query(
+                "?[value] := *kv_transient{scope: $scope, key: $key, value}",
+                t_params,
+            )
+            .map_err(StateError::from)?;
+        if let Some(row) = t_rows.rows.first() {
+            let raw = dv_as_string(&row[0]).ok_or_else(|| {
+                StateError::Serialization("expected string value from kv_transient".to_string())
+            })?;
+            let val: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| StateError::Serialization(e.to_string()))?;
+            return Ok(Some(val));
+        }
         let params = cozo_params! {
             "scope" => DataValue::Str(sp.into()),
-            "key" => DataValue::Str(key.to_string().into()),
+            "key" => DataValue::Str(key_s.into()),
         };
         let rows = self
             .engine
@@ -485,12 +724,10 @@ impl StateStore for CozoStore {
         Ok(keys)
     }
 
-    /// Search for entries whose key or JSON-encoded value contains `query`
-    /// (case-insensitive substring match).
+    /// Search for entries whose value field matches the FTS query.
     ///
-    /// Results are sorted by score (descending). Keys that match both the key
-    /// name and the value receive a score of `1.0`; single-field matches
-    /// receive `0.5`.
+    /// Uses the `kv:fts_val` FTS index created at schema init time.
+    /// Results are returned ranked by BM25 score (descending).
     #[instrument(skip_all, fields(scope = ?scope))]
     async fn search(
         &self,
@@ -504,38 +741,29 @@ impl StateStore for CozoStore {
         let sp = scope_prefix(scope);
         let params = cozo_params! {
             "scope" => DataValue::Str(sp.into()),
+            "query" => DataValue::Str(query.to_string().into()),
+            "limit" => DataValue::from(limit as i64),
         };
+        let fts_q = concat!(
+            "?[key, score] := ",
+            "~kv:fts_val {scope, key | query: $query, k: $limit, bind_score: score},",
+            " scope == $scope\n",
+            ":order -score\n",
+            ":limit $limit",
+        );
         let rows = self
             .engine
-            .run_query("?[key, value] := *kv{scope: $scope, key, value}", params)
+            .run_query(fts_q, params)
             .map_err(StateError::from)?;
-
-        let query_lower = query.to_lowercase();
-        let mut results: Vec<SearchResult> = rows
+        let results: Vec<SearchResult> = rows
             .rows
             .iter()
             .filter_map(|row| {
                 let key = dv_as_string(&row[0])?;
-                let raw = dv_as_string(&row[1])?;
-                let key_hit = key.to_lowercase().contains(&query_lower);
-                let val_hit = raw.to_lowercase().contains(&query_lower);
-                if key_hit || val_hit {
-                    let score = if key_hit && val_hit { 1.0 } else { 0.5 };
-                    let mut sr = SearchResult::new(key, score);
-                    sr.snippet = Some(raw.chars().take(120).collect());
-                    Some(sr)
-                } else {
-                    None
-                }
+                let score = dv_as_f64(&row[1]).unwrap_or(0.5);
+                Some(SearchResult::new(key, score))
             })
             .collect();
-
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        results.truncate(limit);
         Ok(results)
     }
 
@@ -553,19 +781,45 @@ impl StateStore for CozoStore {
         scope: &Scope,
         key: &str,
         value: serde_json::Value,
-        _options: &StoreOptions,
+        options: &StoreOptions,
     ) -> Result<(), StateError> {
-        self.write(scope, key, value).await
+        if options.lifetime == Some(Lifetime::Transient) {
+            let sp = scope_prefix(scope);
+            let raw = serde_json::to_string(&value)
+                .map_err(|e| StateError::Serialization(e.to_string()))?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+            let params = cozo_params! {
+                "scope" => DataValue::Str(sp.into()),
+                "key" => DataValue::Str(key.to_string().into()),
+                "value" => DataValue::Str(raw.into()),
+                "now" => DataValue::from(now),
+            };
+            self.engine
+                .run_mutation(
+                    "?[scope, key, value, created_at] <- [[$scope, $key, $value, $now]] :put kv_transient {scope, key => value, created_at}",
+                    params,
+                )
+                .map_err(StateError::from)?;
+            Ok(())
+        } else {
+            self.write(scope, key, value).await
+        }
     }
 
-    /// No-op in v1.
+    /// Purges all entries from the `kv_transient` relation.
     ///
-    /// CozoDB v1 does not maintain a separate transient table. Entries written
-    /// with [`Lifetime::Transient`] are stored durably and not cleared here.
-    /// A dedicated transient store is planned for v2.
-    ///
-    /// [`Lifetime::Transient`]: layer0::state::Lifetime
-    fn clear_transient(&self) {}
+    /// Called at turn boundaries to discard scratchpad data. Durable entries
+    /// in the `kv` relation are unaffected.
+    fn clear_transient(&self) {
+        // Delete every row from kv_transient.
+        let _ = self.engine.run_mutation(
+            "?[scope, key] := *kv_transient{scope, key}\n:rm kv_transient {scope, key}",
+            Default::default(),
+        );
+    }
 
     async fn link(&self, scope: &Scope, link: &MemoryLink) -> Result<(), StateError> {
         let sp = scope_prefix(scope);
@@ -618,12 +872,20 @@ impl StateStore for CozoStore {
         Ok(())
     }
 
-    /// Traverse links from `from_key` using breadth-first search.
+    /// Traverse links from `from_key` using level-batched BFS.
     ///
     /// Returns all keys reachable within `max_depth` hops via edges matching
     /// `relation` (or any relation if `relation` is `None`). The starting key
     /// is never included in the result. Cycle-safe: each key is visited at
     /// most once.
+    ///
+    /// # Implementation note
+    ///
+    /// Depth semantics are preserved by running one Datalog query per depth
+    /// level (level-batched BFS). All current-frontier nodes are queried in a
+    /// single `is_in(from_key, $frontier)` predicate, reducing round-trips
+    /// from O(nodes) to O(depth). Pure recursive Datalog (transitive closure)
+    /// is intentionally avoided because it cannot be bounded to `max_depth`.
     async fn traverse(
         &self,
         scope: &Scope,
@@ -639,27 +901,30 @@ impl StateStore for CozoStore {
         let mut visited: HashSet<String> = HashSet::new();
         visited.insert(from_key.to_string());
 
-        let mut queue: VecDeque<(String, u32)> = VecDeque::new();
-        queue.push_back((from_key.to_string(), 0));
-
+        // Level-batched BFS: one query per depth level.
+        let mut frontier = vec![from_key.to_string()];
         let mut result: Vec<String> = Vec::new();
 
-        // BFS using repeated edge queries — avoids complex recursive Datalog.
-        while let Some((current, depth)) = queue.pop_front() {
-            if depth >= max_depth {
-                continue;
+        for _ in 0..max_depth {
+            if frontier.is_empty() {
+                break;
             }
-
+            let frontier_dv = DataValue::List(
+                frontier
+                    .iter()
+                    .map(|k| DataValue::Str(k.as_str().into()))
+                    .collect(),
+            );
             let rows = match relation {
                 Some(rel) => {
                     let params = cozo_params! {
                         "scope" => DataValue::Str(sp.clone().into()),
-                        "from_key" => DataValue::Str(current.clone().into()),
-                        "relation" => DataValue::Str(rel.to_string().into()),
+                        "rel" => DataValue::Str(rel.to_string().into()),
+                        "frontier" => frontier_dv,
                     };
                     self.engine
                         .run_query(
-                            "?[to_key] := *edge{scope: $scope, from_key: $from_key, relation: $relation, to_key}",
+                            "?[to_key] := *edge{scope: $scope, from_key, to_key, relation: $rel}, is_in(from_key, $frontier)",
                             params,
                         )
                         .map_err(StateError::from)?
@@ -667,24 +932,24 @@ impl StateStore for CozoStore {
                 None => {
                     let params = cozo_params! {
                         "scope" => DataValue::Str(sp.clone().into()),
-                        "from_key" => DataValue::Str(current.clone().into()),
+                        "frontier" => frontier_dv,
                     };
                     self.engine
                         .run_query(
-                            "?[to_key] := *edge{scope: $scope, from_key: $from_key, to_key}",
+                            "?[to_key] := *edge{scope: $scope, from_key, to_key}, is_in(from_key, $frontier)",
                             params,
                         )
                         .map_err(StateError::from)?
                 }
             };
-
+            frontier.clear();
             for row in &rows.rows {
-                if let Some(to_key) = dv_as_string(&row[0]) {
-                    if !visited.contains(&to_key) {
-                        visited.insert(to_key.clone());
-                        result.push(to_key.clone());
-                        queue.push_back((to_key, depth + 1));
-                    }
+                if let Some(to_key) = dv_as_string(&row[0])
+                    && !visited.contains(&to_key)
+                {
+                    visited.insert(to_key.clone());
+                    result.push(to_key.clone());
+                    frontier.push(to_key);
                 }
             }
         }

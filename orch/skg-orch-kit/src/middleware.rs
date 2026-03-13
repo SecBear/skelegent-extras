@@ -1,12 +1,12 @@
 //! Effect middleware — intercept and transform effects at the dispatch boundary.
 //!
-//! [`MiddlewareOrchestrator`] wraps an inner orchestrator and applies a chain
+//! [`MiddlewareDispatcher`] wraps an inner dispatcher and applies a chain
 //! of [`EffectMiddleware`] transforms to effects returned by each dispatch.
 
 use async_trait::async_trait;
 use layer0::{
-    effect::SignalPayload, OperatorId, Effect, OperatorInput, OperatorOutput, OrchError,
-    Orchestrator, QueryPayload, WorkflowId,
+    Effect, OperatorId, OperatorInput, OperatorOutput, OrchError,
+    dispatch::Dispatcher,
 };
 use std::sync::Arc;
 
@@ -20,27 +20,26 @@ pub trait EffectMiddleware: Send + Sync {
     fn transform(&self, effect: Effect) -> Effect;
 }
 
-/// An orchestrator wrapper that applies [`EffectMiddleware`] to dispatch results.
+/// A dispatcher wrapper that applies [`EffectMiddleware`] to dispatch results.
 ///
-/// Wraps an inner orchestrator. After each `dispatch` or `dispatch_many`, the
-/// returned effects are transformed by the middleware chain (left-to-right).
-/// Signal and query operations are passed through unchanged.
-pub struct MiddlewareOrchestrator {
-    inner: Arc<dyn Orchestrator>,
+/// Wraps an inner dispatcher. After each `dispatch`, the returned effects are
+/// transformed by the middleware chain (left-to-right).
+pub struct MiddlewareDispatcher {
+    inner: Arc<dyn Dispatcher>,
     middlewares: Vec<Arc<dyn EffectMiddleware>>,
 }
 
-impl std::fmt::Debug for MiddlewareOrchestrator {
+impl std::fmt::Debug for MiddlewareDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MiddlewareOrchestrator")
+        f.debug_struct("MiddlewareDispatcher")
             .field("middleware_count", &self.middlewares.len())
             .finish_non_exhaustive()
     }
 }
 
-impl MiddlewareOrchestrator {
-    /// Create a new middleware orchestrator.
-    pub fn new(inner: Arc<dyn Orchestrator>, middlewares: Vec<Arc<dyn EffectMiddleware>>) -> Self {
+impl MiddlewareDispatcher {
+    /// Create a new middleware dispatcher.
+    pub fn new(inner: Arc<dyn Dispatcher>, middlewares: Vec<Arc<dyn EffectMiddleware>>) -> Self {
         Self { inner, middlewares }
     }
 
@@ -58,7 +57,7 @@ impl MiddlewareOrchestrator {
 }
 
 #[async_trait]
-impl Orchestrator for MiddlewareOrchestrator {
+impl Dispatcher for MiddlewareDispatcher {
     async fn dispatch(
         &self,
         operator: &OperatorId,
@@ -68,52 +67,20 @@ impl Orchestrator for MiddlewareOrchestrator {
         output.effects = self.apply_middlewares(output.effects);
         Ok(output)
     }
-
-    async fn dispatch_many(
-        &self,
-        tasks: Vec<(OperatorId, OperatorInput)>,
-    ) -> Vec<Result<OperatorOutput, OrchError>> {
-        let results = self.inner.dispatch_many(tasks).await;
-        results
-            .into_iter()
-            .map(|r| {
-                r.map(|mut output| {
-                    output.effects = self.apply_middlewares(output.effects);
-                    output
-                })
-            })
-            .collect()
-    }
-
-    async fn signal(
-        &self,
-        target: &WorkflowId,
-        signal: SignalPayload,
-    ) -> Result<(), OrchError> {
-        self.inner.signal(target, signal).await
-    }
-
-    async fn query(
-        &self,
-        target: &WorkflowId,
-        query: QueryPayload,
-    ) -> Result<serde_json::Value, OrchError> {
-        self.inner.query(target, query).await
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use layer0::{operator::TriggerType, Content, ExitReason, Scope};
+    use layer0::{operator::TriggerType, Content, ExitReason, Scope, dispatch::Dispatcher};
 
-    /// Orchestrator that returns a fixed set of effects.
-    struct EffectOrchestrator {
+    /// Dispatcher that returns a fixed set of effects.
+    struct EffectDispatcher {
         effects: Vec<Effect>,
     }
 
     #[async_trait]
-    impl Orchestrator for EffectOrchestrator {
+    impl Dispatcher for EffectDispatcher {
         async fn dispatch(
             &self,
             _operator: &OperatorId,
@@ -124,33 +91,6 @@ mod tests {
                             out.effects = self.effects.clone();
                             out
                         })
-        }
-
-        async fn dispatch_many(
-            &self,
-            tasks: Vec<(OperatorId, OperatorInput)>,
-        ) -> Vec<Result<OperatorOutput, OrchError>> {
-            let mut results = Vec::new();
-            for (operator, input) in tasks {
-                results.push(self.dispatch(&operator, input).await);
-            }
-            results
-        }
-
-        async fn signal(
-            &self,
-            _target: &WorkflowId,
-            _signal: SignalPayload,
-        ) -> Result<(), OrchError> {
-            Ok(())
-        }
-
-        async fn query(
-            &self,
-            _target: &WorkflowId,
-            _query: QueryPayload,
-        ) -> Result<serde_json::Value, OrchError> {
-            Ok(serde_json::Value::Null)
         }
     }
 
@@ -242,10 +182,10 @@ mod tests {
 
     #[tokio::test]
     async fn identity_middleware_passes_through() {
-        let inner = Arc::new(EffectOrchestrator {
+        let inner = Arc::new(EffectDispatcher {
             effects: vec![write_effect("key1", "value1")],
         });
-        let mw = MiddlewareOrchestrator::new(inner, vec![Arc::new(IdentityMiddleware)]);
+        let mw = MiddlewareDispatcher::new(inner, vec![Arc::new(IdentityMiddleware)]);
         let operator = OperatorId::new("test");
 
         let output = mw.dispatch(&operator, make_input()).await.unwrap();
@@ -261,10 +201,10 @@ mod tests {
 
     #[tokio::test]
     async fn redact_middleware_replaces_values() {
-        let inner = Arc::new(EffectOrchestrator {
+        let inner = Arc::new(EffectDispatcher {
             effects: vec![write_effect("secret", "password123")],
         });
-        let mw = MiddlewareOrchestrator::new(inner, vec![Arc::new(RedactMiddleware)]);
+        let mw = MiddlewareDispatcher::new(inner, vec![Arc::new(RedactMiddleware)]);
         let operator = OperatorId::new("test");
 
         let output = mw.dispatch(&operator, make_input()).await.unwrap();
@@ -283,10 +223,10 @@ mod tests {
         // Input: key="secret", value="password"
         // After UppercaseKey: key="SECRET", value="password"
         // After Redact: key="SECRET", value="[REDACTED]"
-        let inner = Arc::new(EffectOrchestrator {
+        let inner = Arc::new(EffectDispatcher {
             effects: vec![write_effect("secret", "password")],
         });
-        let mw = MiddlewareOrchestrator::new(
+        let mw = MiddlewareDispatcher::new(
             inner,
             vec![
                 Arc::new(UppercaseKeyMiddleware),

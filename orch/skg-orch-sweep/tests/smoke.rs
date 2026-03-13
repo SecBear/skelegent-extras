@@ -206,7 +206,7 @@ async fn smoke_full_cycle_with_three_decisions() {
         },
     ];
 
-    // Build the operator closure using dispatch_typed + Orchestrator (idiomatic pipeline).
+    // Build the operator closure using dispatch_typed + Dispatcher (idiomatic pipeline).
     let store_clone = Arc::clone(&store);
     let operator =
         move |id: String,

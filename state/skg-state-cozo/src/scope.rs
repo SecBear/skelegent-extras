@@ -35,6 +35,7 @@ pub fn scope_prefix(scope: &Scope) -> String {
 ///
 /// The null byte (`\0`) separator ensures no scope prefix can collide with a
 /// key that happens to start with the same characters.
+#[cfg(not(feature = "cozo"))]
 pub(crate) fn composite_key(scope: &Scope, key: &str) -> String {
     format!("{}\0{}", scope_prefix(scope), key)
 }
@@ -43,6 +44,7 @@ pub(crate) fn composite_key(scope: &Scope, key: &str) -> String {
 /// given scope prefix.
 ///
 /// Returns `None` if the composite key does not belong to the scope.
+#[cfg(not(feature = "cozo"))]
 pub(crate) fn extract_key<'a>(composite: &'a str, scope_pfx: &str) -> Option<&'a str> {
     composite
         .strip_prefix(scope_pfx)
@@ -86,12 +88,14 @@ mod tests {
         assert_eq!(scope_prefix(&s), "custom:research/topicX");
     }
 
+    #[cfg(not(feature = "cozo"))]
     #[test]
     fn composite_key_uses_null_separator() {
         let ck = composite_key(&Scope::Global, "some:key");
         assert_eq!(ck, "global\0some:key");
     }
 
+    #[cfg(not(feature = "cozo"))]
     #[test]
     fn extract_key_round_trips() {
         let scope = Scope::Session(SessionId::new("s1"));
@@ -100,6 +104,7 @@ mod tests {
         assert_eq!(extract_key(&ck, &pfx), Some("my:key"));
     }
 
+    #[cfg(not(feature = "cozo"))]
     #[test]
     fn extract_key_wrong_scope_returns_none() {
         let pfx_a = scope_prefix(&Scope::Global);

@@ -26,16 +26,16 @@
 //! # Fractal promotion
 //!
 //! [`SweepCycleOperator`] wraps `run_sweep_cycle` behind the [`Operator`] trait,
-//! allowing the entire cycle to be dispatched through an [`Orchestrator`] as a
+//! allowing the entire cycle to be dispatched through a [`Dispatcher`] as a
 //! single agent — composing cycles within larger workflows.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use layer0::operator::TriggerType;
+use layer0::dispatch::Dispatcher;
 use layer0::{
     OperatorId, Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput,
-    Orchestrator,
 };
 use skg_orch_kit::{
     dispatch_typed, BudgetDecision, BudgetPolicy, BudgetTracker, CompositionTrace, DispatchError,
@@ -133,7 +133,7 @@ impl CycleReport {
 ///
 /// # Parameters
 ///
-/// - `orch` — orchestrator used to dispatch compare and synthesis operators.
+/// - `orch` — dispatcher used to dispatch compare and synthesis operators.
 /// - `state` — scoped state for dedup reads and cycle report persistence.
 /// - `budget` — budget tracker; consulted before each decision and updated
 ///   after each verdict.
@@ -152,7 +152,7 @@ impl CycleReport {
 /// hard errors.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_sweep_cycle<B: BudgetPolicy>(
-    orch: &dyn Orchestrator,
+    orch: &dyn Dispatcher,
     state: &dyn ScopedState,
     budget: &BudgetTracker<B>,
     trace: &CompositionTrace,
@@ -333,7 +333,7 @@ pub async fn run_sweep_cycle<B: BudgetPolicy>(
 ///
 /// Allows the full sweep cycle — budget-guarded, trace-aware, multi-decision
 /// orchestration plus synthesis — to itself be dispatched through an
-/// [`Orchestrator`] as a single composable agent.
+/// [`Dispatcher`] as a single composable agent.
 ///
 /// # Input
 ///
@@ -343,7 +343,7 @@ pub async fn run_sweep_cycle<B: BudgetPolicy>(
 ///
 /// `output.message` is JSON-serialized [`CycleReport`].
 pub struct SweepCycleOperator<B: BudgetPolicy> {
-    orch: Arc<dyn Orchestrator>,
+    orch: Arc<dyn Dispatcher>,
     state: Arc<dyn ScopedState>,
     budget: Arc<BudgetTracker<B>>,
     trace: Arc<CompositionTrace>,
@@ -357,7 +357,7 @@ impl<B: BudgetPolicy> SweepCycleOperator<B> {
     ///
     /// # Parameters
     ///
-    /// - `orch` — orchestrator used to dispatch compare and synthesis operators.
+    /// - `orch` — dispatcher used to dispatch compare and synthesis operators.
     /// - `state` — scoped state for dedup reads and cycle report persistence.
     /// - `budget` — shared budget tracker; shared across dispatches.
     /// - `trace` — composition trace for cycle/depth detection.
@@ -365,7 +365,7 @@ impl<B: BudgetPolicy> SweepCycleOperator<B> {
     /// - `synthesis_operator` — [`OperatorId`] of the registered synthesis operator.
     /// - `budget_total_usd` — full budget cap in USD.
     pub fn new(
-        orch: Arc<dyn Orchestrator>,
+        orch: Arc<dyn Dispatcher>,
         state: Arc<dyn ScopedState>,
         budget: Arc<BudgetTracker<B>>,
         trace: Arc<CompositionTrace>,
@@ -435,12 +435,11 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    use layer0::dispatch::Dispatcher;
     use async_trait::async_trait;
-    use layer0::effect::SignalPayload;
-    use layer0::orchestrator::QueryPayload;
     use layer0::{
-        OperatorId, Content, ExitReason, OperatorInput, OperatorOutput, OrchError, Orchestrator,
-        Scope, WorkflowId,
+        OperatorId, Content, ExitReason, OperatorInput, OperatorOutput, OrchError,
+        Scope,
     };
     use layer0::test_utils::InMemoryStore;
     use skg_orch_kit::budget::{CapPolicy, NoLimitPolicy};
@@ -508,10 +507,10 @@ mod tests {
         }
     }
 
-    /// Mock orchestrator: returns canned verdicts for compare dispatches and
+    /// Mock dispatcher: returns canned verdicts for compare dispatches and
     /// a canned synthesis report for synthesis dispatches. Tracks whether
     /// synthesis was dispatched via an atomic flag.
-    struct MockOrchestrator {
+    struct MockDispatcher {
         #[allow(dead_code)] // used only to construct; dispatch routes by synthesis_operator
         compare_operator: OperatorId,
         synthesis_operator: OperatorId,
@@ -520,7 +519,7 @@ mod tests {
         synthesis_dispatched: Arc<AtomicBool>,
     }
 
-    impl MockOrchestrator {
+    impl MockDispatcher {
         fn new(
             compare_operator: OperatorId,
             synthesis_operator: OperatorId,
@@ -541,7 +540,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl Orchestrator for MockOrchestrator {
+    impl Dispatcher for MockDispatcher {
         async fn dispatch(
             &self,
             operator: &OperatorId,
@@ -558,33 +557,6 @@ mod tests {
                 ExitReason::Complete,
             ))
         }
-
-        async fn dispatch_many(
-            &self,
-            tasks: Vec<(OperatorId, OperatorInput)>,
-        ) -> Vec<Result<OperatorOutput, OrchError>> {
-            let mut results = Vec::new();
-            for (operator, input) in tasks {
-                results.push(self.dispatch(&operator, input).await);
-            }
-            results
-        }
-
-        async fn signal(
-            &self,
-            _target: &WorkflowId,
-            _signal: SignalPayload,
-        ) -> Result<(), OrchError> {
-            Ok(())
-        }
-
-        async fn query(
-            &self,
-            _target: &WorkflowId,
-            _query: QueryPayload,
-        ) -> Result<serde_json::Value, OrchError> {
-            Ok(serde_json::Value::Null)
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -600,7 +572,7 @@ mod tests {
         let verdict = dummy_verdict("d1");
         let synthesis = dummy_synthesis_report();
 
-        let (orch, _flag) = MockOrchestrator::new(
+        let (orch, _flag) = MockDispatcher::new(
             compare_operator.clone(),
             synthesis_operator.clone(),
             &verdict,
@@ -662,7 +634,7 @@ mod tests {
         let verdict = dummy_verdict("d1");
         let synthesis = dummy_synthesis_report();
 
-        let (orch, _flag) = MockOrchestrator::new(
+        let (orch, _flag) = MockDispatcher::new(
             compare_operator.clone(),
             synthesis_operator.clone(),
             &verdict,
@@ -715,7 +687,7 @@ mod tests {
         let expected_verdict = dummy_verdict("d1");
         let synthesis = dummy_synthesis_report();
 
-        let (orch, _flag) = MockOrchestrator::new(
+        let (orch, _flag) = MockDispatcher::new(
             compare_operator.clone(),
             synthesis_operator.clone(),
             &expected_verdict,
@@ -762,7 +734,7 @@ mod tests {
         let verdict = dummy_verdict("dx");
         let synthesis = dummy_synthesis_report();
 
-        let (orch, synthesis_dispatched) = MockOrchestrator::new(
+        let (orch, synthesis_dispatched) = MockDispatcher::new(
             compare_operator.clone(),
             synthesis_operator.clone(),
             &verdict,
