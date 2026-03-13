@@ -303,7 +303,7 @@ async fn start_run_get_run_and_query_current_state() {
     let queried = orch
         .query(
             &WorkflowId::new(run_id.as_str()),
-            QueryPayload::new("run-view", serde_json::json!({})),
+            QueryPayload::new("skg.run.view", serde_json::json!({})),
         )
         .await
         .expect("query current run view");

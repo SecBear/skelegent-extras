@@ -3,9 +3,10 @@ use async_trait::async_trait;
 use layer0::{Operator, OperatorId};
 use serde_json::{Value, json};
 use skg_run_core::{
-    DriverError, DriverRequest, OrchestrationCommand, ResumeAction, ResumeInput,
+    DriverError, DriverRequest, OrchestrationCommand, PendingResume, ResumeAction, ResumeInput,
     RunControlError, RunController, RunDriver, RunEvent, RunId, RunKernel, RunStarter, RunStore,
-    RunStoreError, RunView, StoreRunRecord, TimerStore, TimerStoreError, WaitPointId,
+    RunStoreError, RunView, StoreRunRecord, TimerStore, TimerStoreError, WaitPointId, WaitStore,
+    WaitStoreError,
 };
 use skg_run_sqlite::SqliteRunStore;
 use std::collections::VecDeque;
@@ -124,6 +125,27 @@ impl SqliteDurableOrchestrator {
         .map_err(map_kernel_error)?;
         let failed_record = StoreRunRecord::new(transition.next, current.backend_ref.clone());
         self.persist_record(Some(current), &failed_record).await
+    }
+
+    async fn clear_resume_if_wait_resolved(
+        &self,
+        run_id: &RunId,
+        wait_point: &WaitPointId,
+    ) -> Result<(), RunControlError> {
+        let Some(record) = self.store.get_run(run_id).await.map_err(map_run_store_error)? else {
+            return Ok(());
+        };
+        if record.view.wait_point() == Some(wait_point) {
+            return Ok(());
+        }
+
+        if let Err(error) = self.store.take_resume(run_id, wait_point).await {
+            eprintln!(
+                "warning: sqlite durable orchestrator left a stale pending resume after resolving the wait for run {} wait point {}: {}",
+                run_id, wait_point, error
+            );
+        }
+        Ok(())
     }
 
     async fn process_event(
@@ -300,21 +322,71 @@ impl RunController for SqliteDurableOrchestrator {
             return Err(RunControlError::WaitPointNotFound(wait_point.clone()));
         }
 
-        // Resume submission on this in-process controller is synchronous: we
-        // advance durable run state directly from the caller-provided input
-        // instead of persisting then immediately consuming a queued resume.
-        // That avoids accepting a resume and deleting it before the run state
-        // transition is durably recorded.
+        // Persist the accepted resume while the durable record still says
+        // `Waiting`. We only clear that row after a later durable state has been
+        // recorded, so a crash cannot lose an accepted resume between durable
+        // checkpoints.
+        let pending_resume = PendingResume::new(
+            run_id.clone(),
+            wait_point.clone(),
+            input.clone(),
+        );
+        self.store
+            .save_resume(pending_resume.clone())
+            .await
+            .map_err(map_wait_store_error)?;
 
-        self.process_event(
-            Some(record),
+        let resume_transition = RunKernel::apply(
+            Some(&record.view),
             RunEvent::Resume {
                 wait_point: wait_point.clone(),
                 input,
                 action: ResumeAction::Continue,
             },
         )
-        .await?;
+        .map_err(map_kernel_error)?;
+
+        let dispatch = match resume_transition.commands.as_slice() {
+            [OrchestrationCommand::DispatchOperator { run_id, payload }] => {
+                (run_id.clone(), payload.clone())
+            }
+            _ => {
+                return Err(RunControlError::Backend(
+                    "resume transition did not produce exactly one dispatch command".into(),
+                ));
+            }
+        };
+
+        let running_record = StoreRunRecord::new(
+            resume_transition.next,
+            record.backend_ref.clone(),
+        );
+        let response = match self
+            .driver
+            .drive_run(DriverRequest::new(
+                dispatch.0,
+                dispatch.1,
+                running_record.backend_ref.clone(),
+            ))
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let (failure_summary, control_error) = split_driver_error(error);
+                self.persist_driver_failure(&running_record, failure_summary)
+                    .await?;
+                self.clear_resume_if_wait_resolved(run_id, wait_point).await?;
+                return Err(control_error);
+            }
+        };
+
+        let updated_running = StoreRunRecord::new(
+            running_record.view,
+            response.backend_ref.or(running_record.backend_ref),
+        );
+        let result = self.process_event(Some(updated_running), response.next_event).await;
+        self.clear_resume_if_wait_resolved(run_id, wait_point).await?;
+        result.map(|_| ())?;
         Ok(())
     }
 
@@ -330,6 +402,13 @@ fn map_run_store_error(error: RunStoreError) -> RunControlError {
         RunStoreError::RunNotFound(run_id) => RunControlError::RunNotFound(run_id),
         RunStoreError::Conflict(message) => RunControlError::Conflict(message),
         RunStoreError::Backend(message) => RunControlError::Backend(message),
+    }
+}
+
+fn map_wait_store_error(error: WaitStoreError) -> RunControlError {
+    match error {
+        WaitStoreError::Conflict(message) => RunControlError::Conflict(message),
+        WaitStoreError::Backend(message) => RunControlError::Backend(message),
     }
 }
 

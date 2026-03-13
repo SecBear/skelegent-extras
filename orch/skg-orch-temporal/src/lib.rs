@@ -661,7 +661,7 @@ impl Queryable for TemporalOrch {
         target: &WorkflowId,
         query: QueryPayload,
     ) -> Result<serde_json::Value, OrchError> {
-        if query.query_type == "run-view" {
+        if query.query_type == RUN_VIEW_QUERY_NAME {
             let run_id = RunId::new(target.as_str());
             let run = match self.run_control_backend {
                 RunControlBackend::MockLocal => self.load_run_record(&run_id).await.map(|record| record.view),
