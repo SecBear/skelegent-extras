@@ -1,69 +1,162 @@
-//! SSE streaming from [`RunSubscription`].
+//! SSE streaming from [`DispatchHandle`].
 
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use axum::response::sse::{Event, Sse};
-use skg_a2a_core::convert::{run_artifact_to_a2a_artifact, run_status_to_task_state};
-use skg_run_core::{RunSubscription, RunUpdate};
+use layer0::dispatch::{DispatchEvent, DispatchHandle};
+use skg_a2a_core::convert::content_to_parts;
+use skg_a2a_core::types::A2aArtifact;
+use skg_a2a_core::TaskState;
+use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 
-/// Convert a [`RunSubscription`] into an SSE stream of A2A [`StreamResponse`] events.
+use super::A2aServerState;
+
+/// Convert a [`DispatchHandle`] into an SSE stream of A2A events.
 ///
-/// Spawns a background task that reads from the subscription and forwards
-/// events as SSE. The stream ends when the subscription closes (run terminal).
-pub(crate) fn stream_run_updates(
-    subscription: RunSubscription,
+/// Registers the dispatch in the server's [`DispatchRegistry`] and spawns a
+/// background task that reads events from the handle, forwarding them as SSE.
+/// The stream ends on terminal events or external cancellation via the registry.
+pub(crate) fn stream_dispatch(
+    handle: DispatchHandle,
     task_id: String,
     context_id: String,
+    state: Arc<A2aServerState>,
+    cancel_rx: watch::Receiver<bool>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
-    let (tx, rx) = tokio::sync::mpsc::channel(32);
-
-    tokio::spawn(pump_updates(subscription, task_id, context_id, tx));
-
+    let (tx, rx) = mpsc::channel(32);
+    tokio::spawn(pump_dispatch_events(
+        handle, task_id, context_id, tx, state, cancel_rx,
+    ));
     Sse::new(ReceiverStream::new(rx))
 }
 
-async fn pump_updates(
-    mut subscription: RunSubscription,
+async fn pump_dispatch_events(
+    mut handle: DispatchHandle,
     task_id: String,
     context_id: String,
-    tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    tx: mpsc::Sender<Result<Event, Infallible>>,
+    state: Arc<A2aServerState>,
+    mut cancel_rx: watch::Receiver<bool>,
 ) {
-    while let Some(update) = subscription.recv().await {
-        let event = match update {
-            RunUpdate::StatusChanged { status, .. } => {
-                let a2a_state = run_status_to_task_state(status);
+    loop {
+        tokio::select! {
+            event = handle.recv() => {
+                let Some(event) = event else { break };
+                let sse_event = match event {
+                    DispatchEvent::Progress { content } => {
+                        state.registry.update_state(&task_id, TaskState::Working);
+                        let parts = content_to_parts(&content);
+                        let evt_value = serde_json::json!({
+                            "type": "status_update",
+                            "task_id": task_id,
+                            "context_id": context_id,
+                            "status": {
+                                "state": TaskState::Working,
+                                "message": {
+                                    "role": "agent",
+                                    "parts": parts,
+                                },
+                            },
+                        });
+                        match Event::default().json_data(evt_value) {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        }
+                    }
+                    DispatchEvent::ArtifactProduced { artifact } => {
+                        let a2a_artifact = dispatch_artifact_to_a2a(&artifact);
+                        let evt_value = serde_json::json!({
+                            "type": "artifact_update",
+                            "task_id": task_id,
+                            "context_id": context_id,
+                            "artifact": a2a_artifact,
+                        });
+                        match Event::default().json_data(evt_value) {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        }
+                    }
+                    DispatchEvent::Completed { output } => {
+                        state.registry.update_state(&task_id, TaskState::Completed);
+                        let parts = content_to_parts(&output.message);
+                        let evt_value = serde_json::json!({
+                            "type": "status_update",
+                            "task_id": task_id,
+                            "context_id": context_id,
+                            "final": true,
+                            "status": {
+                                "state": TaskState::Completed,
+                                "message": {
+                                    "role": "agent",
+                                    "parts": parts,
+                                },
+                            },
+                        });
+                        let sse = match Event::default().json_data(evt_value) {
+                            Ok(e) => e,
+                            Err(_) => break,
+                        };
+                        let _ = tx.send(Ok(sse)).await;
+                        break;
+                    }
+                    DispatchEvent::Failed { error } => {
+                        state.registry.update_state(&task_id, TaskState::Failed);
+                        let evt_value = serde_json::json!({
+                            "type": "status_update",
+                            "task_id": task_id,
+                            "context_id": context_id,
+                            "final": true,
+                            "status": {
+                                "state": TaskState::Failed,
+                                "message": {
+                                    "role": "agent",
+                                    "parts": [{"type": "text", "text": error.to_string()}],
+                                },
+                            },
+                        });
+                        let sse = match Event::default().json_data(evt_value) {
+                            Ok(e) => e,
+                            Err(_) => break,
+                        };
+                        let _ = tx.send(Ok(sse)).await;
+                        break;
+                    }
+                    _ => continue,
+                };
+
+                if tx.send(Ok(sse_event)).await.is_err() {
+                    break;
+                }
+            }
+            _ = cancel_rx.changed() => {
+                handle.cancel();
+                state.registry.update_state(&task_id, TaskState::Canceled);
                 let evt_value = serde_json::json!({
                     "type": "status_update",
                     "task_id": task_id,
                     "context_id": context_id,
-                    "status": {
-                        "state": a2a_state,
-                    },
+                    "final": true,
+                    "status": { "state": TaskState::Canceled },
                 });
-                match Event::default().json_data(evt_value) {
-                    Ok(e) => e,
-                    Err(_) => continue,
+                if let Ok(sse) = Event::default().json_data(evt_value) {
+                    let _ = tx.send(Ok(sse)).await;
                 }
+                break;
             }
-            RunUpdate::ArtifactProduced { artifact, .. } => {
-                let a2a_artifact = run_artifact_to_a2a_artifact(&artifact);
-                let evt_value = serde_json::json!({
-                    "type": "artifact_update",
-                    "task_id": task_id,
-                    "context_id": context_id,
-                    "artifact": a2a_artifact,
-                });
-                match Event::default().json_data(evt_value) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                }
-            }
-            _ => continue,
-        };
-
-        if tx.send(Ok(event)).await.is_err() {
-            break;
         }
     }
+    state.registry.remove(&task_id);
+}
+
+/// Convert a `layer0::dispatch::Artifact` to an A2A artifact.
+fn dispatch_artifact_to_a2a(artifact: &layer0::dispatch::Artifact) -> A2aArtifact {
+    let parts = artifact.parts.iter().flat_map(content_to_parts).collect();
+    let mut a2a = A2aArtifact::new(parts);
+    a2a.artifact_id = artifact.id.clone();
+    a2a.name = artifact.name.clone();
+    a2a.description = artifact.description.clone();
+    a2a.metadata = artifact.metadata.clone();
+    a2a
 }

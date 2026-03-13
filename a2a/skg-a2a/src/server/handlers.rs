@@ -4,20 +4,16 @@ use std::sync::Arc;
 
 use axum::response::IntoResponse;
 use axum::{Extension, Json};
+use skg_a2a_core::convert::{a2a_message_to_operator_input, operator_output_to_a2a_message};
 use skg_a2a_core::jsonrpc::methods;
 use skg_a2a_core::types::{
     CancelTaskRequest, GetTaskRequest, SendMessageRequest, SendMessageResponse, TaskStatus,
 };
 use skg_a2a_core::{
-    A2aError, A2aTask, JsonRpcErrorResponse, JsonRpcRequest, JsonRpcResponse,
+    A2aError, A2aTask, JsonRpcErrorResponse, JsonRpcRequest, JsonRpcResponse, TaskState,
 };
-use skg_a2a_core::convert::{
-    a2a_message_to_operator_input, operator_output_to_a2a_message,
-    run_status_to_task_state,
-};
-use skg_run_core::RunId;
 
-use super::stream::stream_run_updates;
+use super::stream::stream_dispatch;
 use super::A2aServerState;
 
 /// Handle a JSON-RPC request and dispatch to the appropriate method.
@@ -83,46 +79,14 @@ async fn handle_stream_message(
     request: JsonRpcRequest,
 ) -> axum::response::Response {
     let id = request.id.clone();
-    let send_req: SendMessageRequest = match serde_json::from_value(request.params.clone()) {
+    let send_req: SendMessageRequest = match serde_json::from_value(request.params) {
         Ok(r) => r,
         Err(e) => return jsonrpc_error_response(id, &A2aError::ParseError { reason: e.to_string() }),
     };
 
-    // If we have run starter + observer, use the streaming path.
-    let (starter, observer) = match (&state.run_starter, &state.run_observer) {
-        (Some(s), Some(o)) => (s.clone(), o.clone()),
-        _ => {
-            // Fall back to synchronous dispatch.
-            let input = a2a_message_to_operator_input(&send_req.message);
-            let output = match state.dispatcher.dispatch(&state.default_operator, input).await {
-                Ok(handle) => match handle.collect().await {
-                    Ok(o) => o,
-                    Err(e) => {
-                        return jsonrpc_error_response(
-                            id,
-                            &A2aError::Internal {
-                                reason: e.to_string(),
-                            },
-                        );
-                    }
-                },
-                Err(e) => {
-                    return jsonrpc_error_response(
-                        id,
-                        &A2aError::Internal {
-                            reason: e.to_string(),
-                        },
-                    );
-                }
-            };
-            let reply = operator_output_to_a2a_message(&output);
-            let resp = SendMessageResponse::Message { message: reply };
-            return jsonrpc_success_response(id, &resp);
-        }
-    };
-
-    let run_id = match starter.start_run(request.params).await {
-        Ok(rid) => rid,
+    let input = a2a_message_to_operator_input(&send_req.message);
+    let handle = match state.dispatcher.dispatch(&state.default_operator, input).await {
+        Ok(h) => h,
         Err(e) => {
             return jsonrpc_error_response(
                 id,
@@ -133,27 +97,19 @@ async fn handle_stream_message(
         }
     };
 
-    let subscription = match observer.subscribe(&run_id).await {
-        Ok(s) => s,
-        Err(e) => {
-            return jsonrpc_error_response(
-                id,
-                &A2aError::Internal {
-                    reason: e.to_string(),
-                },
-            );
-        }
-    };
-
-    let task_id = run_id.as_str().to_owned();
+    let task_id = handle.id.to_string();
     let context_id = send_req
         .message
         .context_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    stream_run_updates(subscription, task_id, context_id)
-        .into_response()
+    // Create a cancel channel for the registry; the streaming pump
+    // watches this and calls handle.cancel() when triggered.
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    state.registry.register(task_id.clone(), cancel_tx);
+
+    stream_dispatch(handle, task_id, context_id, state, cancel_rx).into_response()
 }
 
 async fn handle_get_task(
@@ -166,36 +122,19 @@ async fn handle_get_task(
         Err(e) => return jsonrpc_error_response(id, &A2aError::ParseError { reason: e.to_string() }),
     };
 
-    let controller = match &state.run_controller {
-        Some(c) => c,
-        None => {
-            return jsonrpc_error_response(
-                id,
-                &A2aError::UnsupportedOperation {
-                    operation: "tasks/get".into(),
-                },
-            );
+    match state.registry.get_state(&get_req.id) {
+        Some(task_state) => {
+            let mut task = A2aTask::new(TaskStatus::new(task_state));
+            task.id = get_req.id;
+            jsonrpc_success_response(id, &task)
         }
-    };
-
-    let run_id = RunId::new(&get_req.id);
-    let view = match controller.get_run(&run_id).await {
-        Ok(v) => v,
-        Err(_) => {
-            return jsonrpc_error_response(
-                id,
-                &A2aError::TaskNotFound {
-                    task_id: get_req.id,
-                },
-            );
-        }
-    };
-
-    let task_state = run_status_to_task_state(view.status());
-    let mut task = A2aTask::new(TaskStatus::new(task_state));
-    task.id = run_id.as_str().to_owned();
-
-    jsonrpc_success_response(id, &task)
+        None => jsonrpc_error_response(
+            id,
+            &A2aError::TaskNotFound {
+                task_id: get_req.id,
+            },
+        ),
+    }
 }
 
 async fn handle_cancel_task(
@@ -208,46 +147,18 @@ async fn handle_cancel_task(
         Err(e) => return jsonrpc_error_response(id, &A2aError::ParseError { reason: e.to_string() }),
     };
 
-    let controller = match &state.run_controller {
-        Some(c) => c,
-        None => {
-            return jsonrpc_error_response(
-                id,
-                &A2aError::UnsupportedOperation {
-                    operation: "tasks/cancel".into(),
-                },
-            );
-        }
-    };
-
-    let run_id = RunId::new(&cancel_req.id);
-    if controller.cancel_run(&run_id).await.is_err() {
-        return jsonrpc_error_response(
+    if state.registry.cancel(&cancel_req.id) {
+        let mut task = A2aTask::new(TaskStatus::new(TaskState::Canceled));
+        task.id = cancel_req.id;
+        jsonrpc_success_response(id, &task)
+    } else {
+        jsonrpc_error_response(
             id,
             &A2aError::TaskNotCancelable {
                 task_id: cancel_req.id,
             },
-        );
+        )
     }
-
-    // Return the task in its current state after cancellation.
-    let view = match controller.get_run(&run_id).await {
-        Ok(v) => v,
-        Err(_) => {
-            // Successfully cancelled but can't fetch — return minimal cancelled task.
-            let mut task = A2aTask::new(TaskStatus::new(
-                skg_a2a_core::TaskState::Canceled,
-            ));
-            task.id = cancel_req.id;
-            return jsonrpc_success_response(id, &task);
-        }
-    };
-
-    let task_state = run_status_to_task_state(view.status());
-    let mut task = A2aTask::new(TaskStatus::new(task_state));
-    task.id = run_id.as_str().to_owned();
-
-    jsonrpc_success_response(id, &task)
 }
 
 /// Build a JSON-RPC success response.

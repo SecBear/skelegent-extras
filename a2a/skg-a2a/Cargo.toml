@@ -15,7 +15,6 @@ client = ["dep:reqwest"]
 [dependencies]
 skg-a2a-core = { path = "../../../skelegent/a2a/skg-a2a-core", version = "0.4.1" }
 layer0 = { path = "../../../skelegent/layer0", version = "0.4.1" }
-skg-run-core = { path = "../../../skelegent/orch/skg-run-core", version = "0.4.1" }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
