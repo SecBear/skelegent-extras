@@ -53,11 +53,11 @@ pub use config::{RetryPolicy, TemporalConfig};
 
 use async_trait::async_trait;
 use client::{MockTemporalClient, TemporalClient, TemporalError};
-use layer0::dispatch::Dispatcher;
+use layer0::dispatch::{DispatchEvent, DispatchHandle, Dispatcher};
 use layer0::effect::SignalPayload;
 use layer0::error::OrchError;
-use layer0::id::{OperatorId, WorkflowId};
-use layer0::operator::{Operator, OperatorInput, OperatorOutput};
+use layer0::id::{DispatchId, OperatorId, WorkflowId};
+use layer0::operator::{Operator, OperatorInput};
 use serde_json::{json, Value};
 use skg_effects_core::{QueryPayload, Queryable, Signalable};
 use skg_run_core::{
@@ -614,21 +614,34 @@ impl Dispatcher for TemporalOrch {
         &self,
         operator: &OperatorId,
         input: OperatorInput,
-    ) -> Result<OperatorOutput, OrchError> {
+    ) -> Result<DispatchHandle, OrchError> {
         let bytes = serde_json::to_vec(&input)
             .map_err(|e| OrchError::DispatchFailed(format!("serialization: {e}")))?;
 
-        let result_bytes = self
-            .client
-            .execute_activity(operator.as_str(), bytes)
-            .await
-            .map_err(|e| match e {
-                TemporalError::WorkflowNotFound(msg) => OrchError::OperatorNotFound(msg),
-                other => OrchError::DispatchFailed(other.to_string()),
-            })?;
+        let client = Arc::clone(&self.client);
+        let op_str = operator.as_str().to_owned();
+        let (handle, sender) = DispatchHandle::channel(DispatchId::new("temporal"));
 
-        serde_json::from_slice(&result_bytes)
-            .map_err(|e| OrchError::DispatchFailed(format!("deserialization: {e}")))
+        tokio::spawn(async move {
+            let result = client
+                .execute_activity(&op_str, bytes)
+                .await
+                .map_err(|e| match e {
+                    TemporalError::WorkflowNotFound(msg) => OrchError::OperatorNotFound(msg),
+                    other => OrchError::DispatchFailed(other.to_string()),
+                })
+                .and_then(|result_bytes| {
+                    serde_json::from_slice(&result_bytes)
+                        .map_err(|e| OrchError::DispatchFailed(format!("deserialization: {e}")))
+                });
+
+            match result {
+                Ok(output) => { let _ = sender.send(DispatchEvent::Completed { output }).await; }
+                Err(err) => { let _ = sender.send(DispatchEvent::Failed { error: err }).await; }
+            }
+        });
+
+        Ok(handle)
     }
 }
 

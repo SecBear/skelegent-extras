@@ -62,7 +62,7 @@ where
     let mut op_input = OperatorInput::new(Content::text(json_text), trigger);
     op_input.metadata = metadata;
 
-    let output = dispatcher.dispatch(operator, op_input).await?;
+    let output = dispatcher.dispatch(operator, op_input).await?.collect().await?;
 
     let text = output
         .message
@@ -91,7 +91,7 @@ pub async fn dispatch_many(
     for (operator_id, input) in tasks {
         let d = Arc::clone(&dispatcher);
         handles.push(tokio::spawn(async move {
-            d.dispatch(&operator_id, input).await
+            d.dispatch(&operator_id, input).await?.collect().await
         }));
     }
     let mut results = Vec::with_capacity(handles.len());
@@ -109,8 +109,9 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use layer0::{
-        ExitReason, OrchError, dispatch::Dispatcher,
+        ExitReason, OrchError, dispatch::{Dispatcher, DispatchEvent, DispatchHandle, DispatchSender},
     };
+    use layer0::id::DispatchId;
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
 
@@ -133,12 +134,17 @@ mod tests {
             &self,
             _operator: &OperatorId,
             input: OperatorInput,
-        ) -> Result<OperatorOutput, OrchError> {
-            Ok({
-                            let mut out = OperatorOutput::new(input.message, ExitReason::Complete);
-                            out.effects = vec![];
-                            out
-                        })
+        ) -> Result<DispatchHandle, OrchError> {
+            let output = {
+                let mut out = OperatorOutput::new(input.message, ExitReason::Complete);
+                out.effects = vec![];
+                out
+            };
+            let (handle, sender) = DispatchHandle::channel(DispatchId::new("test"));
+            tokio::spawn(async move {
+                let _ = sender.send(DispatchEvent::Completed { output }).await;
+            });
+            Ok(handle)
         }
     }
 
@@ -153,12 +159,17 @@ mod tests {
             &self,
             _operator: &OperatorId,
             _input: OperatorInput,
-        ) -> Result<OperatorOutput, OrchError> {
-            Ok({
-                            let mut out = OperatorOutput::new(Content::text(&self.response), ExitReason::Complete);
-                            out.effects = vec![];
-                            out
-                        })
+        ) -> Result<DispatchHandle, OrchError> {
+            let output = {
+                let mut out = OperatorOutput::new(Content::text(&self.response), ExitReason::Complete);
+                out.effects = vec![];
+                out
+            };
+            let (handle, sender) = DispatchHandle::channel(DispatchId::new("test"));
+            tokio::spawn(async move {
+                let _ = sender.send(DispatchEvent::Completed { output }).await;
+            });
+            Ok(handle)
         }
     }
 

@@ -1,0 +1,40 @@
+[package]
+name = "skg-a2a"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A2A protocol server and client for skelegent"
+
+[features]
+default = ["server", "client"]
+server = ["dep:axum", "dep:axum-extra", "dep:tokio-stream"]
+client = ["dep:reqwest"]
+
+[dependencies]
+skg-a2a-core = { path = "../../../skelegent/a2a/skg-a2a-core", version = "0.4.1" }
+layer0 = { path = "../../../skelegent/layer0", version = "0.4.1" }
+skg-run-core = { path = "../../../skelegent/orch/skg-run-core", version = "0.4.1" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "rt"] }
+tracing = "0.1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+
+# Server deps (feature-gated)
+axum = { version = "0.8", optional = true }
+axum-extra = { version = "0.10", features = ["typed-header"], optional = true }
+tokio-stream = { version = "0.1", optional = true }
+
+# Client deps (feature-gated)
+reqwest = { version = "0.12", features = ["json"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "net"] }
+axum = "0.8"
+layer0 = { path = "../../../skelegent/layer0", version = "0.4.1" }
+skg-a2a-core = { path = "../../../skelegent/a2a/skg-a2a-core", version = "0.4.1" }
+async-trait = "0.1"

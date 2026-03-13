@@ -434,6 +434,8 @@ impl<B: BudgetPolicy + 'static> Operator for SweepCycleOperator<B> {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use layer0::dispatch::{DispatchEvent, DispatchHandle};
+    use layer0::DispatchId;
 
     use layer0::dispatch::Dispatcher;
     use async_trait::async_trait;
@@ -545,17 +547,22 @@ mod tests {
             &self,
             operator: &OperatorId,
             _input: OperatorInput,
-        ) -> Result<OperatorOutput, OrchError> {
+        ) -> Result<DispatchHandle, OrchError> {
             let json = if *operator == self.synthesis_operator {
                 self.synthesis_dispatched.store(true, Ordering::SeqCst);
                 self.synthesis_response.clone()
             } else {
                 self.compare_response.clone()
             };
-            Ok(OperatorOutput::new(
+            let output = OperatorOutput::new(
                 Content::text(json),
                 ExitReason::Complete,
-            ))
+            );
+            let (handle, sender) = DispatchHandle::channel(DispatchId::new("test"));
+            tokio::spawn(async move {
+                let _ = sender.send(DispatchEvent::Completed { output }).await;
+            });
+            Ok(handle)
         }
     }
 

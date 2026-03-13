@@ -15,6 +15,7 @@ members = [
   "auth/skg-auth-omp",
   "client/skg-client-parallel",
   "run/skg-run-sqlite",
+  "a2a/skg-a2a",
 ]
 
 [workspace.package]

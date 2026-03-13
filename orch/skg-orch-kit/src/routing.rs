@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use layer0::{
-    OperatorId, OperatorInput, OperatorOutput, OrchError,
-    dispatch::Dispatcher,
+    OperatorId, OperatorInput, OrchError,
+    dispatch::{Dispatcher, DispatchHandle},
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,7 +68,7 @@ impl Dispatcher for RoutingDispatcher {
         &self,
         operator: &OperatorId,
         input: OperatorInput,
-    ) -> Result<OperatorOutput, OrchError> {
+    ) -> Result<DispatchHandle, OrchError> {
         self.resolve(operator).dispatch(operator, input).await
     }
 }
@@ -76,7 +76,8 @@ impl Dispatcher for RoutingDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use layer0::{operator::TriggerType, Content, ExitReason, dispatch::Dispatcher};
+    use layer0::{operator::TriggerType, Content, ExitReason, OperatorOutput, dispatch::{Dispatcher, DispatchEvent, DispatchHandle}};
+    use layer0::id::DispatchId;
     use std::sync::Mutex;
 
     /// Mock dispatcher that records the operator name for every dispatch it receives.
@@ -97,9 +98,14 @@ mod tests {
             &self,
             operator: &OperatorId,
             _input: OperatorInput,
-        ) -> Result<OperatorOutput, OrchError> {
+        ) -> Result<DispatchHandle, OrchError> {
             self.dispatched.lock().unwrap().push(operator.as_str().to_owned());
-            Ok(OperatorOutput::new(Content::text("ok"), ExitReason::Complete))
+            let output = OperatorOutput::new(Content::text("ok"), ExitReason::Complete);
+            let (handle, sender) = DispatchHandle::channel(DispatchId::new("test"));
+            tokio::spawn(async move {
+                let _ = sender.send(DispatchEvent::Completed { output }).await;
+            });
+            Ok(handle)
         }
     }
 
@@ -115,8 +121,8 @@ mod tests {
         let router = RoutingDispatcher::new(Arc::new(mock_b))
             .route("alpha", Arc::new(mock_a));
 
-        router.dispatch(&OperatorId::new("alpha"), make_input()).await.unwrap();
-        router.dispatch(&OperatorId::new("beta"), make_input()).await.unwrap();
+        router.dispatch(&OperatorId::new("alpha"), make_input()).await.unwrap().collect().await.unwrap();
+        router.dispatch(&OperatorId::new("beta"), make_input()).await.unwrap().collect().await.unwrap();
 
         assert_eq!(*log_a.lock().unwrap(), vec!["alpha"]);
         assert_eq!(*log_b.lock().unwrap(), vec!["beta"]);
@@ -130,7 +136,7 @@ mod tests {
         let router = RoutingDispatcher::new(Arc::new(mock_b))
             .route("alpha", Arc::new(mock_a));
 
-        router.dispatch(&OperatorId::new("gamma"), make_input()).await.unwrap();
+        router.dispatch(&OperatorId::new("gamma"), make_input()).await.unwrap().collect().await.unwrap();
 
         assert!(log_a.lock().unwrap().is_empty(), "route for alpha must not fire");
         assert_eq!(*log_b.lock().unwrap(), vec!["gamma"]);

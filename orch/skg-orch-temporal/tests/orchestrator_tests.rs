@@ -112,7 +112,10 @@ async fn dispatch_single_operator() {
     let output = orch
         .dispatch(&OperatorId::new("echo"), simple_input("hello"))
         .await
-        .expect("dispatch should succeed");
+        .expect("dispatch should succeed")
+        .collect()
+        .await
+        .expect("collect should succeed");
 
     assert_eq!(output.message, Content::text("hello"));
     assert_eq!(output.exit_reason, ExitReason::Complete);
@@ -122,10 +125,13 @@ async fn dispatch_single_operator() {
 async fn dispatch_unknown_agent_returns_error() {
     let orch = TemporalOrch::new(TemporalConfig::default());
 
-    let err = orch
+    let result = orch
         .dispatch(&OperatorId::new("ghost"), simple_input("x"))
-        .await
-        .expect_err("unregistered agent must return an error");
+        .await;
+    let err = match result {
+        Err(e) => e,
+        Ok(handle) => handle.collect().await.expect_err("unregistered agent must return an error"),
+    };
 
     assert!(
         err.to_string().contains("operator not found"),
@@ -143,11 +149,17 @@ async fn dispatch_many_all_succeed() {
     let result_a = orch
         .dispatch(&OperatorId::new("a"), simple_input("msg-a"))
         .await
-        .expect("dispatch a should succeed");
+        .expect("dispatch a should succeed")
+        .collect()
+        .await
+        .expect("collect a should succeed");
     let result_b = orch
         .dispatch(&OperatorId::new("b"), simple_input("msg-b"))
         .await
-        .expect("dispatch b should succeed");
+        .expect("dispatch b should succeed")
+        .collect()
+        .await
+        .expect("collect b should succeed");
 
     assert_eq!(result_a.message, Content::text("msg-a"));
     assert_eq!(result_b.message, Content::text("msg-b"));
@@ -159,17 +171,22 @@ async fn dispatch_many_partial_failure() {
     orch.register(OperatorId::new("ok"), Arc::new(EchoOperator));
     // "bad" is intentionally not registered.
 
-    let ok_result = orch
+    let ok_output = orch
         .dispatch(&OperatorId::new("ok"), simple_input("fine"))
-        .await;
+        .await
+        .and_then(|h| Ok(h));
     let bad_result = orch
         .dispatch(&OperatorId::new("bad"), simple_input("boom"))
         .await;
 
-    assert!(ok_result.is_ok(), "known agent should succeed");
-    assert!(bad_result.is_err(), "unknown agent should fail");
+    assert!(ok_output.is_ok(), "known agent should succeed");
+    let bad_err = match bad_result {
+        Err(e) => Some(e),
+        Ok(handle) => handle.collect().await.err(),
+    };
+    assert!(bad_err.is_some(), "unknown agent should fail");
     assert!(matches!(
-        bad_result.unwrap_err(),
+        bad_err.unwrap(),
         OrchError::OperatorNotFound(_)
     ));
 }
@@ -190,10 +207,13 @@ async fn dispatch_propagates_operator_failure() {
     let mut orch = TemporalOrch::new(TemporalConfig::default());
     orch.register(OperatorId::new("fail"), Arc::new(AlwaysFailOperator));
 
-    let err = orch
+    let result = orch
         .dispatch(&OperatorId::new("fail"), simple_input("trigger"))
-        .await
-        .expect_err("failing operator must propagate an error");
+        .await;
+    let err = match result {
+        Err(e) => e,
+        Ok(handle) => handle.collect().await.expect_err("failing operator must propagate an error"),
+    };
 
     // The error comes through as DispatchFailed (operator error serialised
     // through the mock client pipeline).

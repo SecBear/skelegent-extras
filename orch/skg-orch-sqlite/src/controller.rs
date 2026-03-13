@@ -5,11 +5,11 @@ use serde_json::{Value, json};
 use skg_run_core::{
     BackendRunRef, DriverError, DriverRequest, OrchestrationCommand, PendingResume, ResumeAction,
     ResumeInput, RunControlError, RunController, RunDriver, RunEvent, RunId, RunKernel,
-    RunStarter, RunStore, RunStoreError, RunView, StoreRunRecord, TimerStore, TimerStoreError,
-    WaitPointId, WaitStore, WaitStoreError,
+    RunObserver, RunStarter, RunStatus, RunStore, RunStoreError, RunSubscription, RunUpdate,
+    RunView, StoreRunRecord, TimerStore, TimerStoreError, WaitPointId, WaitStore, WaitStoreError,
 };
 use skg_run_sqlite::SqliteRunStore;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,6 +25,8 @@ pub struct SqliteDurableOrchestrator {
     /// through the same replay path. Intentionally coarse — correctness over
     /// throughput.
     resume_lock: tokio::sync::Mutex<()>,
+    /// Per-run broadcast channels for [`RunUpdate`] events.
+    update_channels: std::sync::Mutex<HashMap<RunId, tokio::sync::broadcast::Sender<RunUpdate>>>,
 }
 
 const PENDING_RESUME_BACKEND_REF_PREFIX: &str = "sqlite:pending-resume:";
@@ -37,6 +39,7 @@ impl SqliteDurableOrchestrator {
             driver: SqliteRunDriver::new(),
             run_counter: AtomicU64::new(0),
             resume_lock: tokio::sync::Mutex::new(()),
+            update_channels: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -65,6 +68,52 @@ impl SqliteDurableOrchestrator {
             .expect("system clock before unix epoch")
             .as_nanos();
         RunId::new(format!("sqlite-run-{now}-{counter}"))
+    }
+
+    /// Get or create a broadcast channel for a run.
+    fn get_or_create_channel(&self, run_id: &RunId) -> tokio::sync::broadcast::Sender<RunUpdate> {
+        let mut channels = self.update_channels.lock().expect("channel lock poisoned");
+        channels
+            .entry(run_id.clone())
+            .or_insert_with(|| {
+                let (tx, _) = tokio::sync::broadcast::channel(64);
+                tx
+            })
+            .clone()
+    }
+
+    /// Emit a [`RunUpdate`] to subscribers, if any exist.
+    fn emit_update(&self, update: RunUpdate) {
+        let run_id = match &update {
+            RunUpdate::StatusChanged { run_id, .. } => run_id,
+            RunUpdate::ArtifactProduced { run_id, .. } => run_id,
+            _ => return, // future non_exhaustive variants
+        };
+        let channels = self.update_channels.lock().expect("channel lock poisoned");
+        if let Some(tx) = channels.get(run_id) {
+            let _ = tx.send(update); // no receivers = no-op
+        }
+    }
+
+    /// Clean up a channel after a run reaches a terminal state.
+    fn cleanup_channel(&self, run_id: &RunId) {
+        let mut channels = self.update_channels.lock().expect("channel lock poisoned");
+        channels.remove(run_id);
+    }
+
+    /// Emit a status-changed update derived from a [`RunView`], and clean up
+    /// the channel if the run has reached a terminal state.
+    fn emit_status_from_view(&self, view: &RunView) {
+        self.emit_update(RunUpdate::StatusChanged {
+            run_id: view.run_id().clone(),
+            status: view.status(),
+        });
+        match view.status() {
+            RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled => {
+                self.cleanup_channel(view.run_id());
+            }
+            _ => {}
+        }
     }
 
     /// Pure read — fetches the persisted record without triggering replay.
@@ -157,6 +206,7 @@ impl SqliteDurableOrchestrator {
                     Some(pending_resume_backend_ref(&wait_point, base_backend_ref)),
                 );
                 self.persist_record(Some(&current_record), &running_record).await?;
+                self.emit_status_from_view(&running_record.view);
                 running_record
             }
             RunView::Running { .. } => current_record,
@@ -287,6 +337,10 @@ impl SqliteDurableOrchestrator {
                 }
                 commands.extend(transition.commands);
                 record = Some(next_record);
+                // Notify subscribers of the state transition.
+                if let Some(ref rec) = record {
+                    self.emit_status_from_view(&rec.view);
+                }
                 continue;
             }
 
@@ -471,6 +525,16 @@ impl RunController for SqliteDurableOrchestrator {
         let record = self.load_and_replay(run_id).await?;
         self.process_event(Some(record), RunEvent::Cancel).await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl RunObserver for SqliteDurableOrchestrator {
+    async fn subscribe(&self, run_id: &RunId) -> Result<RunSubscription, RunControlError> {
+        // Verify the run exists before creating a channel.
+        let _record = self.get_record(run_id).await?;
+        let tx = self.get_or_create_channel(run_id);
+        Ok(RunSubscription::new(tx.subscribe()))
     }
 }
 

@@ -5,8 +5,8 @@
 
 use async_trait::async_trait;
 use layer0::{
-    Effect, OperatorId, OperatorInput, OperatorOutput, OrchError,
-    dispatch::Dispatcher,
+    Effect, OperatorId, OperatorInput, OrchError,
+    dispatch::{Dispatcher, DispatchEvent, DispatchHandle},
 };
 use std::sync::Arc;
 
@@ -42,18 +42,6 @@ impl MiddlewareDispatcher {
     pub fn new(inner: Arc<dyn Dispatcher>, middlewares: Vec<Arc<dyn EffectMiddleware>>) -> Self {
         Self { inner, middlewares }
     }
-
-    fn apply_middlewares(&self, effects: Vec<Effect>) -> Vec<Effect> {
-        effects
-            .into_iter()
-            .map(|mut effect| {
-                for mw in &self.middlewares {
-                    effect = mw.transform(effect);
-                }
-                effect
-            })
-            .collect()
-    }
 }
 
 #[async_trait]
@@ -62,17 +50,39 @@ impl Dispatcher for MiddlewareDispatcher {
         &self,
         operator: &OperatorId,
         input: OperatorInput,
-    ) -> Result<OperatorOutput, OrchError> {
-        let mut output = self.inner.dispatch(operator, input).await?;
-        output.effects = self.apply_middlewares(output.effects);
-        Ok(output)
+    ) -> Result<DispatchHandle, OrchError> {
+        let mut inner_handle = self.inner.dispatch(operator, input).await?;
+        let middlewares: Vec<Arc<dyn EffectMiddleware>> = self.middlewares.clone();
+        let (handle, sender) = DispatchHandle::channel(inner_handle.id.clone());
+        tokio::spawn(async move {
+            while let Some(event) = inner_handle.recv().await {
+                match event {
+                    DispatchEvent::Completed { mut output } => {
+                        output.effects = output
+                            .effects
+                            .into_iter()
+                            .map(|mut effect| {
+                                for mw in &middlewares {
+                                    effect = mw.transform(effect);
+                                }
+                                effect
+                            })
+                            .collect();
+                        let _ = sender.send(DispatchEvent::Completed { output }).await;
+                    }
+                    other => { let _ = sender.send(other).await; }
+                }
+            }
+        });
+        Ok(handle)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use layer0::{operator::TriggerType, Content, ExitReason, Scope, dispatch::Dispatcher};
+    use layer0::{operator::TriggerType, Content, ExitReason, OperatorOutput, Scope, dispatch::{DispatchEvent, DispatchHandle}};
+    use layer0::id::DispatchId;
 
     /// Dispatcher that returns a fixed set of effects.
     struct EffectDispatcher {
@@ -85,12 +95,17 @@ mod tests {
             &self,
             _operator: &OperatorId,
             _input: OperatorInput,
-        ) -> Result<OperatorOutput, OrchError> {
-            Ok({
-                            let mut out = OperatorOutput::new(Content::text("ok"), ExitReason::Complete);
-                            out.effects = self.effects.clone();
-                            out
-                        })
+        ) -> Result<DispatchHandle, OrchError> {
+            let output = {
+                let mut out = OperatorOutput::new(Content::text("ok"), ExitReason::Complete);
+                out.effects = self.effects.clone();
+                out
+            };
+            let (handle, sender) = DispatchHandle::channel(DispatchId::new("test"));
+            tokio::spawn(async move {
+                let _ = sender.send(DispatchEvent::Completed { output }).await;
+            });
+            Ok(handle)
         }
     }
 
@@ -188,7 +203,7 @@ mod tests {
         let mw = MiddlewareDispatcher::new(inner, vec![Arc::new(IdentityMiddleware)]);
         let operator = OperatorId::new("test");
 
-        let output = mw.dispatch(&operator, make_input()).await.unwrap();
+        let output = mw.dispatch(&operator, make_input()).await.unwrap().collect().await.unwrap();
         assert_eq!(output.effects.len(), 1);
 
         if let Effect::WriteMemory { key, value, .. } = &output.effects[0] {
@@ -207,7 +222,7 @@ mod tests {
         let mw = MiddlewareDispatcher::new(inner, vec![Arc::new(RedactMiddleware)]);
         let operator = OperatorId::new("test");
 
-        let output = mw.dispatch(&operator, make_input()).await.unwrap();
+        let output = mw.dispatch(&operator, make_input()).await.unwrap().collect().await.unwrap();
 
         if let Effect::WriteMemory { key, value, .. } = &output.effects[0] {
             assert_eq!(key, "secret");
@@ -235,7 +250,7 @@ mod tests {
         );
         let operator = OperatorId::new("test");
 
-        let output = mw.dispatch(&operator, make_input()).await.unwrap();
+        let output = mw.dispatch(&operator, make_input()).await.unwrap().collect().await.unwrap();
 
         if let Effect::WriteMemory { key, value, .. } = &output.effects[0] {
             assert_eq!(key, "SECRET");
