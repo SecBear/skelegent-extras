@@ -3,7 +3,7 @@ use serde_json::json;
 use skg_run_core::{
     BackendRunRef, PendingResume, PendingSignal, PortableWakeDeadline, ResumeInput, RunId,
     RunOutcome, RunStatus, RunStore, RunStoreError, RunView, ScheduledTimer, StoreRunRecord,
-    TimerStore, TimerStoreError, WaitPointId, WaitReason, WaitStore,
+    TimerStore, WaitPointId, WaitReason, WaitStore,
 };
 use skg_run_sqlite::SqliteRunStore;
 use std::{env, fs, time::{SystemTime, UNIX_EPOCH}};
@@ -129,11 +129,8 @@ async fn timers_can_be_replaced_listed_and_cancelled() {
     assert_eq!(due[1].wake_at, later);
 
     store.cancel_timer(&run_id, &wait_point).await.unwrap();
-    assert!(matches!(
-        store.cancel_timer(&run_id, &wait_point).await.unwrap_err(),
-        TimerStoreError::TimerNotFound { run_id: ref found_run, wait_point: ref found_wait }
-            if *found_run == run_id && *found_wait == wait_point
-    ));
+    // Second cancel is idempotent — portable contract says missing cancel is Ok(()).
+    store.cancel_timer(&run_id, &wait_point).await.unwrap();
     let remaining = store.due_timers(&later, 10).await.unwrap();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].wait_point, WaitPointId::new("wait-4"));

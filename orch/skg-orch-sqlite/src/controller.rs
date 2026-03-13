@@ -20,6 +20,9 @@ pub struct SqliteDurableOrchestrator {
     store: Arc<SqliteRunStore>,
     driver: SqliteRunDriver,
     run_counter: AtomicU64,
+    /// Serializes `resume_run` calls so two concurrent callers cannot both
+    /// observe a `Waiting` state and independently dispatch the same resume.
+    resume_lock: tokio::sync::Mutex<()>,
 }
 
 const PENDING_RESUME_BACKEND_REF_PREFIX: &str = "sqlite:pending-resume:";
@@ -31,6 +34,7 @@ impl SqliteDurableOrchestrator {
             store,
             driver: SqliteRunDriver::new(),
             run_counter: AtomicU64::new(0),
+            resume_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -413,6 +417,7 @@ impl RunController for SqliteDurableOrchestrator {
         wait_point: &WaitPointId,
         input: ResumeInput,
     ) -> Result<(), RunControlError> {
+        let _guard = self.resume_lock.lock().await;
         let record = self.load_record(run_id).await?;
         let active_wait = match &record.view {
             RunView::Waiting { wait_point, .. } => wait_point,
@@ -473,29 +478,35 @@ fn map_wait_store_error(error: WaitStoreError) -> RunControlError {
 fn pending_resume_backend_ref(
     wait_point: &WaitPointId,
     backend_ref: &BackendRunRef,
- ) -> BackendRunRef {
+) -> BackendRunRef {
+    let payload = serde_json::json!({
+        "wait_point": wait_point.as_str(),
+        "backend_ref": backend_ref.as_str()
+    });
     BackendRunRef::new(format!(
-        "{}{}::{}",
+        "{}{}",
         PENDING_RESUME_BACKEND_REF_PREFIX,
-        wait_point.as_str(),
-        backend_ref.as_str()
+        payload
     ))
 }
 
 fn pending_resume_wait_point(backend_ref: Option<&BackendRunRef>) -> Option<WaitPointId> {
     let value = backend_ref?.as_str().strip_prefix(PENDING_RESUME_BACKEND_REF_PREFIX)?;
-    let (wait_point, _) = value.split_once("::")?;
-    Some(WaitPointId::new(wait_point))
+    let parsed: serde_json::Value = serde_json::from_str(value).ok()?;
+    let wp = parsed.get("wait_point")?.as_str()?;
+    Some(WaitPointId::new(wp))
 }
 
 fn strip_pending_resume_backend_ref(
     backend_ref: Option<&BackendRunRef>,
- ) -> Option<BackendRunRef> {
+) -> Option<BackendRunRef> {
     match backend_ref {
-        Some(value) if value.as_str().starts_with(PENDING_RESUME_BACKEND_REF_PREFIX) => value
-            .as_str()
-            .split_once("::")
-            .map(|(_, original)| BackendRunRef::new(original)),
+        Some(value) if value.as_str().starts_with(PENDING_RESUME_BACKEND_REF_PREFIX) => {
+            let json_str = value.as_str().strip_prefix(PENDING_RESUME_BACKEND_REF_PREFIX)?;
+            let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
+            let original = parsed.get("backend_ref")?.as_str()?;
+            Some(BackendRunRef::new(original))
+        }
         Some(value) => Some(value.clone()),
         None => None,
     }

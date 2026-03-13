@@ -74,8 +74,8 @@ impl TimerStore for SqliteRunStore {
                 .prepare(
                     "SELECT run_id, wait_point, wake_at
                      FROM run_timers
-                     WHERE julianday(wake_at) <= julianday(?1)
-                     ORDER BY julianday(wake_at) ASC, run_id ASC, wait_point ASC
+                     WHERE replace(wake_at, 'Z', '') <= replace(?1, 'Z', '')
+                     ORDER BY replace(wake_at, 'Z', '') ASC, run_id ASC, wait_point ASC
                      LIMIT ?2",
                 )
                 .map_err(|error| TimerStoreError::Backend(sqlite_backend_error("prepare due timers", error)))?;
