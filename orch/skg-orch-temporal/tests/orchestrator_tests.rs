@@ -69,6 +69,24 @@ fn temporal_config_serde_round_trip() {
 }
 
 #[test]
+fn temporal_config_deserializes_when_workflow_type_is_missing() {
+    let legacy = serde_json::json!({
+        "server_url": "legacy:7233",
+        "namespace": "prod",
+        "task_queue": "legacy-queue",
+        "identity": "worker-legacy"
+    });
+
+    let recovered: TemporalConfig =
+        serde_json::from_value(legacy).expect("deserialize legacy TemporalConfig");
+    assert_eq!(recovered.server_url, "legacy:7233");
+    assert_eq!(recovered.namespace, "prod");
+    assert_eq!(recovered.task_queue, "legacy-queue");
+    assert_eq!(recovered.identity, "worker-legacy");
+    assert_eq!(recovered.workflow_type, "skg.generic.durable-run");
+}
+
+#[test]
 fn retry_policy_serde_round_trip() {
     let original = RetryPolicy {
         initial_interval_ms: 500,

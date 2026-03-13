@@ -58,6 +58,42 @@ impl SqliteRunStore {
     }
 }
 
+impl SqliteRunStore {
+    /// Load a persisted resume for a specific run/wait-point without consuming it.
+    pub async fn load_resume(
+        &self,
+        run_id: &RunId,
+        wait_point: &WaitPointId,
+    ) -> Result<Option<PendingResume>, WaitStoreError> {
+        let run_id = run_id.clone();
+        let wait_point = wait_point.clone();
+
+        self.with_conn(WaitStoreError::Backend, move |conn| {
+            let input_json = conn
+                .query_row(
+                    "SELECT input_json FROM run_resumes WHERE run_id = ?1 AND wait_point = ?2",
+                    params![run_id.as_str(), wait_point.as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| {
+                    WaitStoreError::Backend(sqlite_backend_error("load resume", error))
+                })?;
+
+            input_json
+                .map(|raw| {
+                    decode_resume(&run_id, &wait_point, &raw).map_err(|error| {
+                        WaitStoreError::Backend(format!(
+                            "deserialize resume for run {} wait point {}: {error}",
+                            run_id, wait_point
+                        ))
+                    })
+                })
+                .transpose()
+        })
+    }
+}
+
 // Safety: the only connection is protected by a Mutex and never shared across await points.
 unsafe impl Send for SqliteRunStore {}
 // Safety: the only connection is protected by a Mutex and never shared across await points.

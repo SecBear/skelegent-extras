@@ -24,6 +24,7 @@ pub struct TemporalConfig {
     /// type; Temporal's server-assigned run ID remains internal. The workflow
     /// must expose the expected run-view query, control signal, and resume
     /// update handlers.
+    #[serde(default = "default_workflow_type")]
     pub workflow_type: String,
 }
 
@@ -38,6 +39,10 @@ impl Default for TemporalConfig {
             workflow_type: "skg.generic.durable-run".to_string(),
         }
     }
+}
+
+fn default_workflow_type() -> String {
+    "skg.generic.durable-run".to_string()
 }
 
 impl TemporalConfig {

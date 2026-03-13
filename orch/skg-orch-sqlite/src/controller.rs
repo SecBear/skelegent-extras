@@ -3,10 +3,10 @@ use async_trait::async_trait;
 use layer0::{Operator, OperatorId};
 use serde_json::{Value, json};
 use skg_run_core::{
-    DriverError, DriverRequest, OrchestrationCommand, PendingResume, ResumeAction, ResumeInput,
-    RunControlError, RunController, RunDriver, RunEvent, RunId, RunKernel, RunStarter, RunStore,
-    RunStoreError, RunView, StoreRunRecord, TimerStore, TimerStoreError, WaitPointId, WaitStore,
-    WaitStoreError,
+    BackendRunRef, DriverError, DriverRequest, OrchestrationCommand, PendingResume, ResumeAction,
+    ResumeInput, RunControlError, RunController, RunDriver, RunEvent, RunId, RunKernel,
+    RunStarter, RunStore, RunStoreError, RunView, StoreRunRecord, TimerStore, TimerStoreError,
+    WaitPointId, WaitStore, WaitStoreError,
 };
 use skg_run_sqlite::SqliteRunStore;
 use std::collections::VecDeque;
@@ -21,6 +21,8 @@ pub struct SqliteDurableOrchestrator {
     driver: SqliteRunDriver,
     run_counter: AtomicU64,
 }
+
+const PENDING_RESUME_BACKEND_REF_PREFIX: &str = "sqlite:pending-resume:";
 
 impl SqliteDurableOrchestrator {
     /// Create a new SQLite durable orchestrator.
@@ -60,21 +62,143 @@ impl SqliteDurableOrchestrator {
     }
 
     async fn load_record(&self, run_id: &RunId) -> Result<StoreRunRecord, RunControlError> {
-        self.store
+        let record = self
+            .store
             .get_run(run_id)
             .await
             .map_err(map_run_store_error)?
-            .ok_or_else(|| RunControlError::RunNotFound(run_id.clone()))
+            .ok_or_else(|| RunControlError::RunNotFound(run_id.clone()))?;
+        self.replay_pending_resume_if_any(record).await
     }
+
+    async fn replay_pending_resume_if_any(
+        &self,
+        record: StoreRunRecord,
+    ) -> Result<StoreRunRecord, RunControlError> {
+        let pending = match &record.view {
+            RunView::Waiting {
+                run_id, wait_point, ..
+            } => self
+                .store
+                .load_resume(run_id, wait_point)
+                .await
+                .map_err(map_wait_store_error)?,
+            RunView::Running { run_id } => match pending_resume_wait_point(record.backend_ref.as_ref()) {
+                Some(wait_point) => self
+                    .store
+                    .load_resume(run_id, &wait_point)
+                    .await
+                    .map_err(map_wait_store_error)?,
+                None => None,
+            },
+            _ => None,
+        };
+
+        match pending {
+            Some(pending) => self.dispatch_persisted_resume(record, pending).await,
+            None => Ok(record),
+        }
+    }
+
+    async fn dispatch_persisted_resume(
+        &self,
+        current_record: StoreRunRecord,
+        pending_resume: PendingResume,
+    ) -> Result<StoreRunRecord, RunControlError> {
+        let run_id = pending_resume.run_id.clone();
+        let wait_point = pending_resume.wait_point.clone();
+        let dispatch_payload = skg_run_core::DispatchPayload::Resume {
+            wait_point: wait_point.clone(),
+            input: pending_resume.input.clone(),
+        };
+
+        let running_record = match &current_record.view {
+            RunView::Waiting { .. } => {
+                let resume_transition = RunKernel::apply(
+                    Some(&current_record.view),
+                    RunEvent::Resume {
+                        wait_point: wait_point.clone(),
+                        input: pending_resume.input.clone(),
+                        action: ResumeAction::Continue,
+                    },
+                )
+                .map_err(map_kernel_error)?;
+
+                for command in &resume_transition.commands {
+                    if let OrchestrationCommand::CancelWake { run_id, wait_point } = command {
+                        match self.store.cancel_timer(run_id, wait_point).await {
+                            Ok(()) | Err(TimerStoreError::TimerNotFound { .. }) => {}
+                            Err(error) => return Err(map_timer_store_error(error)),
+                        }
+                    }
+                }
+
+                let base_backend_ref = current_record.backend_ref.as_ref().ok_or_else(|| {
+                    RunControlError::Conflict(format!(
+                        "missing backend ref for run {} before replaying persisted resume",
+                        run_id
+                    ))
+                })?;
+                let running_record = StoreRunRecord::new(
+                    resume_transition.next,
+                    Some(pending_resume_backend_ref(&wait_point, base_backend_ref)),
+                );
+                self.persist_record(Some(&current_record), &running_record).await?;
+                running_record
+            }
+            RunView::Running { .. } => current_record,
+            other => {
+                return Err(RunControlError::Conflict(format!(
+                    "cannot replay pending resume for run {} while in status {:?}",
+                    run_id,
+                    other.status()
+                )))
+            }
+        };
+
+        let response = match self
+            .driver
+            .drive_run(DriverRequest::new(
+                run_id.clone(),
+                dispatch_payload,
+                strip_pending_resume_backend_ref(running_record.backend_ref.as_ref()),
+            ))
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let (failure_summary, control_error) = split_driver_error(error);
+                self.persist_driver_failure(
+                    &StoreRunRecord::new(
+                        running_record.view.clone(),
+                        strip_pending_resume_backend_ref(running_record.backend_ref.as_ref()),
+                    ),
+                    failure_summary,
+                )
+                .await?;
+                self.clear_resume_if_wait_resolved(&run_id, &wait_point).await?;
+                return Err(control_error);
+            }
+        };
+
+        let updated_running = StoreRunRecord::new(
+            running_record.view,
+            response
+                .backend_ref
+                .or_else(|| strip_pending_resume_backend_ref(running_record.backend_ref.as_ref())),
+        );
+        let result = self.process_event(Some(updated_running), response.next_event).await;
+        self.clear_resume_if_wait_resolved(&run_id, &wait_point).await?;
+        result
+    }
+
 
     async fn persist_record(
         &self,
         previous: Option<&StoreRunRecord>,
         next: &StoreRunRecord,
     ) -> Result<(), RunControlError> {
-        if let Some(previous) = previous {
-            self.clear_wait_timer_if_needed(previous, &next.view)
-                .await?;
+        if let Some(_previous) = previous {
             self.store
                 .put_run(next.clone())
                 .await
@@ -84,30 +208,6 @@ impl SqliteDurableOrchestrator {
                 .insert_run(next.clone())
                 .await
                 .map_err(map_run_store_error)
-        }
-    }
-
-    async fn clear_wait_timer_if_needed(
-        &self,
-        previous: &StoreRunRecord,
-        next_view: &RunView,
-    ) -> Result<(), RunControlError> {
-        let Some(previous_wait) = previous.view.wait_point().cloned() else {
-            return Ok(());
-        };
-
-        if next_view.wait_point() == Some(&previous_wait) {
-            return Ok(());
-        }
-
-        match self
-            .store
-            .cancel_timer(previous.view.run_id(), &previous_wait)
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(TimerStoreError::TimerNotFound { .. }) => Ok(()),
-            Err(error) => Err(map_timer_store_error(error)),
         }
     }
 
@@ -228,6 +328,12 @@ impl SqliteDurableOrchestrator {
                 | OrchestrationCommand::CompleteRun { .. }
                 | OrchestrationCommand::FailRun { .. }
                 | OrchestrationCommand::CancelRun { .. } => {}
+                OrchestrationCommand::CancelWake { run_id, wait_point } => {
+                    match self.store.cancel_timer(&run_id, &wait_point).await {
+                        Ok(()) | Err(TimerStoreError::TimerNotFound { .. }) => {}
+                        Err(error) => return Err(map_timer_store_error(error)),
+                    }
+                }
                 OrchestrationCommand::ScheduleWake {
                     run_id,
                     wait_point,
@@ -329,64 +435,16 @@ impl RunController for SqliteDurableOrchestrator {
         let pending_resume = PendingResume::new(
             run_id.clone(),
             wait_point.clone(),
-            input.clone(),
+            input,
         );
         self.store
             .save_resume(pending_resume.clone())
             .await
             .map_err(map_wait_store_error)?;
 
-        let resume_transition = RunKernel::apply(
-            Some(&record.view),
-            RunEvent::Resume {
-                wait_point: wait_point.clone(),
-                input,
-                action: ResumeAction::Continue,
-            },
-        )
-        .map_err(map_kernel_error)?;
-
-        let dispatch = match resume_transition.commands.as_slice() {
-            [OrchestrationCommand::DispatchOperator { run_id, payload }] => {
-                (run_id.clone(), payload.clone())
-            }
-            _ => {
-                return Err(RunControlError::Backend(
-                    "resume transition did not produce exactly one dispatch command".into(),
-                ));
-            }
-        };
-
-        let running_record = StoreRunRecord::new(
-            resume_transition.next,
-            record.backend_ref.clone(),
-        );
-        let response = match self
-            .driver
-            .drive_run(DriverRequest::new(
-                dispatch.0,
-                dispatch.1,
-                running_record.backend_ref.clone(),
-            ))
+        self.dispatch_persisted_resume(record, pending_resume)
             .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                let (failure_summary, control_error) = split_driver_error(error);
-                self.persist_driver_failure(&running_record, failure_summary)
-                    .await?;
-                self.clear_resume_if_wait_resolved(run_id, wait_point).await?;
-                return Err(control_error);
-            }
-        };
-
-        let updated_running = StoreRunRecord::new(
-            running_record.view,
-            response.backend_ref.or(running_record.backend_ref),
-        );
-        let result = self.process_event(Some(updated_running), response.next_event).await;
-        self.clear_resume_if_wait_resolved(run_id, wait_point).await?;
-        result.map(|_| ())?;
+            .map(|_| ())?;
         Ok(())
     }
 
@@ -409,6 +467,37 @@ fn map_wait_store_error(error: WaitStoreError) -> RunControlError {
     match error {
         WaitStoreError::Conflict(message) => RunControlError::Conflict(message),
         WaitStoreError::Backend(message) => RunControlError::Backend(message),
+    }
+}
+
+fn pending_resume_backend_ref(
+    wait_point: &WaitPointId,
+    backend_ref: &BackendRunRef,
+ ) -> BackendRunRef {
+    BackendRunRef::new(format!(
+        "{}{}::{}",
+        PENDING_RESUME_BACKEND_REF_PREFIX,
+        wait_point.as_str(),
+        backend_ref.as_str()
+    ))
+}
+
+fn pending_resume_wait_point(backend_ref: Option<&BackendRunRef>) -> Option<WaitPointId> {
+    let value = backend_ref?.as_str().strip_prefix(PENDING_RESUME_BACKEND_REF_PREFIX)?;
+    let (wait_point, _) = value.split_once("::")?;
+    Some(WaitPointId::new(wait_point))
+}
+
+fn strip_pending_resume_backend_ref(
+    backend_ref: Option<&BackendRunRef>,
+ ) -> Option<BackendRunRef> {
+    match backend_ref {
+        Some(value) if value.as_str().starts_with(PENDING_RESUME_BACKEND_REF_PREFIX) => value
+            .as_str()
+            .split_once("::")
+            .map(|(_, original)| BackendRunRef::new(original)),
+        Some(value) => Some(value.clone()),
+        None => None,
     }
 }
 

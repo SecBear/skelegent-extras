@@ -6,11 +6,12 @@ use layer0::{
 use serde_json::json;
 use skg_orch_sqlite::SqliteDurableOrchestrator;
 use skg_run_core::{
-    PortableWakeDeadline, ResumeInput, RunControlError, RunController, RunStarter, RunStatus,
-    RunView, TimerStore, WaitReason, WaitStore,
+    PendingResume, PortableWakeDeadline, ResumeInput, RunControlError, RunController, RunStarter,
+    RunStatus, RunView, TimerStore, WaitReason, WaitStore,
 };
 use skg_run_sqlite::SqliteRunStore;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn input_payload(input: &OperatorInput) -> serde_json::Value {
     input
@@ -18,6 +19,14 @@ fn input_payload(input: &OperatorInput) -> serde_json::Value {
         .as_text()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
         .unwrap_or_else(|| json!({}))
+}
+
+fn persistent_sqlite_path(name: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{name}-{nanos}.sqlite"))
 }
 
 fn wait_output(wait_point: &str) -> OperatorOutput {
@@ -171,6 +180,60 @@ async fn start_wait_resume_query_and_complete() {
         other => panic!("expected completed run, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn persisted_resume_is_replayed_after_reopening_orchestrator() {
+    let db_path = persistent_sqlite_path("sqlite-orch-resume-replay");
+    let run_store = Arc::new(SqliteRunStore::open(&db_path).expect("open first run store"));
+    let mut first = SqliteDurableOrchestrator::new(run_store.clone());
+    first.register(OperatorId::new("approval"), Arc::new(ApprovalOperator));
+
+    let run_id = first
+        .start_operator_run(OperatorId::new("approval"), json!({ "ticket": 7 }))
+        .await
+        .expect("start durable run");
+    let waiting = first.get_run(&run_id).await.expect("query waiting run");
+    let wait_point = match waiting {
+        RunView::Waiting { wait_point, .. } => wait_point,
+        other => panic!("expected waiting run before replay, got {other:?}"),
+    };
+
+    run_store
+        .save_resume(PendingResume::new(
+            run_id.clone(),
+            wait_point.clone(),
+            ResumeInput::new(json!({ "approved": true })),
+        ))
+        .await
+        .expect("persist accepted resume");
+
+    drop(first);
+    drop(run_store);
+
+    let reopened_store = Arc::new(SqliteRunStore::open(&db_path).expect("reopen run store"));
+    let mut reopened = SqliteDurableOrchestrator::new(reopened_store.clone());
+    reopened.register(OperatorId::new("approval"), Arc::new(ApprovalOperator));
+
+    let replayed = reopened
+        .get_run(&run_id)
+        .await
+        .expect("replay persisted resume on query");
+    match replayed {
+        RunView::Completed { result, .. } => {
+            assert_eq!(result, json!({ "approved": true, "source": "resume" }));
+        }
+        other => panic!("expected completed run after replay, got {other:?}"),
+    }
+    assert!(
+        reopened_store
+            .take_resume(&run_id, &wait_point)
+            .await
+            .expect("inspect replayed resume row")
+            .is_none(),
+        "replayed resume should be consumed after the run advances"
+    );
+}
+
 
 #[tokio::test]
 async fn cancel_waiting_run_marks_terminal_state() {
