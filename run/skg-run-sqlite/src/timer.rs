@@ -49,16 +49,14 @@ impl TimerStore for SqliteRunStore {
         let wait_point = wait_point.clone();
 
         self.with_conn(TimerStoreError::Backend, move |conn| {
-            let deleted = conn
+            let _deleted = conn
                 .execute(
                     "DELETE FROM run_timers WHERE run_id = ?1 AND wait_point = ?2",
                     params![run_id.as_str(), wait_point.as_str()],
                 )
-                .map_err(|error| TimerStoreError::Backend(sqlite_backend_error("cancel timer", error)))?;
-
-            if deleted == 0 {
-                return Err(TimerStoreError::TimerNotFound { run_id, wait_point });
-            }
+                .map_err(|error| {
+                    TimerStoreError::Backend(sqlite_backend_error("cancel timer", error))
+                })?;
 
             Ok(())
         })
@@ -76,8 +74,8 @@ impl TimerStore for SqliteRunStore {
                 .prepare(
                     "SELECT run_id, wait_point, wake_at
                      FROM run_timers
-                     WHERE wake_at <= ?1
-                     ORDER BY wake_at ASC, run_id ASC, wait_point ASC
+                     WHERE julianday(wake_at) <= julianday(?1)
+                     ORDER BY julianday(wake_at) ASC, run_id ASC, wait_point ASC
                      LIMIT ?2",
                 )
                 .map_err(|error| TimerStoreError::Backend(sqlite_backend_error("prepare due timers", error)))?;
@@ -119,20 +117,56 @@ mod tests {
     use skg_run_core::TimerStore;
 
     #[tokio::test]
-    async fn missing_timer_returns_typed_not_found_error() {
+    async fn missing_timer_cancel_is_idempotent() {
         let store = SqliteRunStore::open_in_memory().expect("open store");
         let run_id = RunId::new("run-missing");
         let wait_point = WaitPointId::new("wait-missing");
 
-        let error = store
+        store
             .cancel_timer(&run_id, &wait_point)
             .await
-            .expect_err("missing timer should return typed error");
+            .expect("missing timer cancel should be idempotent");
+    }
 
-        assert!(matches!(
-            error,
-            TimerStoreError::TimerNotFound { run_id: found_run, wait_point: found_wait }
-                if found_run == run_id && found_wait == wait_point
-        ));
+    #[tokio::test]
+    async fn due_timers_orders_fractional_deadlines_by_timestamp() {
+        let store = SqliteRunStore::open_in_memory().expect("open store");
+        let run_id = RunId::new("run-fractional");
+        let base_wait = WaitPointId::new("wait-base");
+        let later_wait = WaitPointId::new("wait-later");
+        let base = PortableWakeDeadline::parse("2026-03-12T08:15:30Z").unwrap();
+        let later = PortableWakeDeadline::parse("2026-03-12T08:15:30.1Z").unwrap();
+
+        store
+            .schedule_timer(ScheduledTimer::new(
+                run_id.clone(),
+                later_wait.clone(),
+                later.clone(),
+            ))
+            .await
+            .expect("schedule later timer");
+        store
+            .schedule_timer(ScheduledTimer::new(
+                run_id.clone(),
+                base_wait.clone(),
+                base.clone(),
+            ))
+            .await
+            .expect("schedule base timer");
+
+        let due_at_base = store
+            .due_timers(&base, 10)
+            .await
+            .expect("query due timers at base");
+        assert_eq!(due_at_base.len(), 1);
+        assert_eq!(due_at_base[0].wait_point, base_wait);
+
+        let due_after_later = store
+            .due_timers(&later, 10)
+            .await
+            .expect("query due timers after later");
+        assert_eq!(due_after_later.len(), 2);
+        assert_eq!(due_after_later[0].wait_point, base_wait);
+        assert_eq!(due_after_later[1].wait_point, later_wait);
     }
 }
