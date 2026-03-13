@@ -60,6 +60,7 @@ async fn pump_dispatch_events(
                                 },
                             },
                         });
+                        state.registry.broadcast(&task_id, evt_value.clone());
                         match Event::default().json_data(evt_value) {
                             Ok(e) => e,
                             Err(_) => continue,
@@ -73,6 +74,7 @@ async fn pump_dispatch_events(
                             "context_id": context_id,
                             "artifact": a2a_artifact,
                         });
+                        state.registry.broadcast(&task_id, evt_value.clone());
                         match Event::default().json_data(evt_value) {
                             Ok(e) => e,
                             Err(_) => continue,
@@ -94,6 +96,7 @@ async fn pump_dispatch_events(
                                 },
                             },
                         });
+                        state.registry.broadcast(&task_id, evt_value.clone());
                         let sse = match Event::default().json_data(evt_value) {
                             Ok(e) => e,
                             Err(_) => break,
@@ -116,6 +119,7 @@ async fn pump_dispatch_events(
                                 },
                             },
                         });
+                        state.registry.broadcast(&task_id, evt_value.clone());
                         let sse = match Event::default().json_data(evt_value) {
                             Ok(e) => e,
                             Err(_) => break,
@@ -140,6 +144,7 @@ async fn pump_dispatch_events(
                     "final": true,
                     "status": { "state": TaskState::Canceled },
                 });
+                state.registry.broadcast(&task_id, evt_value.clone());
                 if let Ok(sse) = Event::default().json_data(evt_value) {
                     let _ = tx.send(Ok(sse)).await;
                 }
@@ -159,4 +164,47 @@ fn dispatch_artifact_to_a2a(artifact: &layer0::dispatch::Artifact) -> A2aArtifac
     a2a.description = artifact.description.clone();
     a2a.metadata = artifact.metadata.clone();
     a2a
+}
+
+
+/// Stream events for an existing dispatch from a broadcast receiver.
+pub(crate) fn stream_subscription(
+    mut rx: tokio::sync::broadcast::Receiver<serde_json::Value>,
+    task_id: String,
+    state: Arc<A2aServerState>,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let (tx, sse_rx) = mpsc::channel(32);
+    tokio::spawn(async move {
+        // Send initial status snapshot.
+        if let Some(current_state) = state.registry.get_state(&task_id) {
+            let evt = serde_json::json!({
+                "type": "status_update",
+                "task_id": task_id,
+                "status": { "state": current_state },
+            });
+            if let Ok(sse) = Event::default().json_data(evt)
+                && tx.send(Ok(sse)).await.is_err()
+            {
+                return;
+            }
+        }
+        // Forward broadcast events until closed or sender dropped.
+        loop {
+            match rx.recv().await {
+                Ok(value) => {
+                    match Event::default().json_data(value) {
+                        Ok(sse) => {
+                            if tx.send(Ok(sse)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    Sse::new(ReceiverStream::new(sse_rx))
 }

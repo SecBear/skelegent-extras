@@ -23,6 +23,8 @@ pub(crate) struct DispatchRegistry {
 struct ActiveDispatch {
     cancel: tokio::sync::watch::Sender<bool>,
     state: TaskState,
+    /// Broadcast channel for multicasting SSE events to subscribers.
+    events_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
 }
 
 impl DispatchRegistry {
@@ -34,11 +36,13 @@ impl DispatchRegistry {
 
     /// Register a dispatch's cancel token with initial `Submitted` state.
     pub fn register(&self, task_id: String, cancel_tx: tokio::sync::watch::Sender<bool>) {
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
         self.active.lock().unwrap().insert(
             task_id,
             ActiveDispatch {
                 cancel: cancel_tx,
                 state: TaskState::Submitted,
+                events_tx,
             },
         );
     }
@@ -68,6 +72,25 @@ impl DispatchRegistry {
     /// Remove a completed/failed/cancelled dispatch entry.
     pub fn remove(&self, task_id: &str) {
         self.active.lock().unwrap().remove(task_id);
+    }
+
+    /// Broadcast an event value to all subscribers of a dispatch.
+    pub fn broadcast(&self, task_id: &str, value: serde_json::Value) {
+        if let Some(entry) = self.active.lock().unwrap().get(task_id) {
+            // Ignore send errors — means no receivers are listening.
+            let _ = entry.events_tx.send(value);
+        }
+    }
+
+    /// Subscribe to events for an existing dispatch.
+    /// Returns None if the task is not found.
+    pub fn subscribe(&self, task_id: &str) -> Option<tokio::sync::broadcast::Receiver<serde_json::Value>> {
+        self.active.lock().unwrap().get(task_id).map(|e| e.events_tx.subscribe())
+    }
+
+    /// List all active task IDs with their current states.
+    pub fn list(&self) -> Vec<(String, TaskState)> {
+        self.active.lock().unwrap().iter().map(|(id, e)| (id.clone(), e.state)).collect()
     }
 }
 
