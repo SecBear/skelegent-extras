@@ -197,7 +197,7 @@ fn status_name(status: RunStatus) -> &'static str {
         RunStatus::Completed => "completed",
         RunStatus::Failed => "failed",
         RunStatus::Cancelled => "cancelled",
-        _ => "unknown",
+        _ => unreachable!("skg-run-sqlite does not support RunStatus variant: store schema update required"),
     }
 }
 

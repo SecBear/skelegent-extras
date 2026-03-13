@@ -20,8 +20,10 @@ pub struct SqliteDurableOrchestrator {
     store: Arc<SqliteRunStore>,
     driver: SqliteRunDriver,
     run_counter: AtomicU64,
-    /// Serializes `resume_run` calls so two concurrent callers cannot both
-    /// observe a `Waiting` state and independently dispatch the same resume.
+    /// Serializes crash-recovery replay and state-mutating operations so that
+    /// concurrent `get_run`, `resume_run`, and `cancel_run` calls cannot race
+    /// through the same replay path. Intentionally coarse — correctness over
+    /// throughput.
     resume_lock: tokio::sync::Mutex<()>,
 }
 
@@ -65,13 +67,20 @@ impl SqliteDurableOrchestrator {
         RunId::new(format!("sqlite-run-{now}-{counter}"))
     }
 
-    async fn load_record(&self, run_id: &RunId) -> Result<StoreRunRecord, RunControlError> {
-        let record = self
-            .store
+    /// Pure read — fetches the persisted record without triggering replay.
+    async fn get_record(&self, run_id: &RunId) -> Result<StoreRunRecord, RunControlError> {
+        self.store
             .get_run(run_id)
             .await
             .map_err(map_run_store_error)?
-            .ok_or_else(|| RunControlError::RunNotFound(run_id.clone()))?;
+            .ok_or_else(|| RunControlError::RunNotFound(run_id.clone()))
+    }
+
+    /// Acquires `resume_lock`, reads the record, then replays any pending
+    /// crash-recovery resume. This is the ONLY path that may trigger replay.
+    async fn load_and_replay(&self, run_id: &RunId) -> Result<StoreRunRecord, RunControlError> {
+        let _guard = self.resume_lock.lock().await;
+        let record = self.get_record(run_id).await?;
         self.replay_pending_resume_if_any(record).await
     }
 
@@ -357,9 +366,15 @@ impl SqliteDurableOrchestrator {
                     return Err(RunControlError::InvalidInput(message));
                 }
                 _ => {
-                    return Err(RunControlError::Backend(
-                        "unsupported orchestration command for sqlite durable orchestrator".into(),
-                    ));
+                    let current_record = record.clone().ok_or_else(|| {
+                        RunControlError::Backend("unknown command missing current record".into())
+                    })?;
+                    let message = "unsupported orchestration command for sqlite durable orchestrator".to_string();
+                    if persisted {
+                        self.persist_driver_failure(&current_record, message.clone())
+                            .await?;
+                    }
+                    return Err(RunControlError::Backend(message));
                 }
             }
         }
@@ -389,11 +404,11 @@ impl RunStarter for SqliteDurableOrchestrator {
 #[async_trait]
 impl RunController for SqliteDurableOrchestrator {
     async fn get_run(&self, run_id: &RunId) -> Result<RunView, RunControlError> {
-        Ok(self.load_record(run_id).await?.view)
+        Ok(self.load_and_replay(run_id).await?.view)
     }
 
     async fn signal_run(&self, run_id: &RunId, _signal: Value) -> Result<(), RunControlError> {
-        let record = self.load_record(run_id).await?;
+        let record = self.get_record(run_id).await?;
         if !matches!(
             record.view,
             RunView::Running { .. } | RunView::Waiting { .. }
@@ -417,8 +432,7 @@ impl RunController for SqliteDurableOrchestrator {
         wait_point: &WaitPointId,
         input: ResumeInput,
     ) -> Result<(), RunControlError> {
-        let _guard = self.resume_lock.lock().await;
-        let record = self.load_record(run_id).await?;
+        let record = self.load_and_replay(run_id).await?;
         let active_wait = match &record.view {
             RunView::Waiting { wait_point, .. } => wait_point,
             other => {
@@ -454,7 +468,7 @@ impl RunController for SqliteDurableOrchestrator {
     }
 
     async fn cancel_run(&self, run_id: &RunId) -> Result<(), RunControlError> {
-        let record = self.load_record(run_id).await?;
+        let record = self.load_and_replay(run_id).await?;
         self.process_event(Some(record), RunEvent::Cancel).await?;
         Ok(())
     }
