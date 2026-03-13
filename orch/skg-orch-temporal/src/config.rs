@@ -40,6 +40,19 @@ impl Default for TemporalConfig {
     }
 }
 
+impl TemporalConfig {
+    /// Return the server URL in a form accepted by HTTP/gRPC clients.
+    #[cfg(any(test, feature = "temporal-sdk"))]
+    pub(crate) fn normalized_server_url(&self) -> String {
+        let server = self.server_url.trim();
+        if server.contains("://") {
+            server.to_string()
+        } else {
+            format!("http://{server}")
+        }
+    }
+}
+
 /// Retry policy applied to activity and workflow executions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryPolicy {
@@ -62,5 +75,29 @@ impl Default for RetryPolicy {
             max_attempts: 3,
             backoff_coefficient: 2.0,
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalized_server_url_adds_http_scheme_for_bare_host_port() {
+        let config = TemporalConfig::default();
+        assert_eq!(config.normalized_server_url(), "http://localhost:7233");
+    }
+
+    #[test]
+    fn normalized_server_url_preserves_explicit_scheme() {
+        let config = TemporalConfig {
+            server_url: "https://temporal.internal:7233".to_string(),
+            ..TemporalConfig::default()
+        };
+        assert_eq!(
+            config.normalized_server_url(),
+            "https://temporal.internal:7233"
+        );
     }
 }

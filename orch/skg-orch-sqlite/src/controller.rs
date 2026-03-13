@@ -3,10 +3,9 @@ use async_trait::async_trait;
 use layer0::{Operator, OperatorId};
 use serde_json::{Value, json};
 use skg_run_core::{
-    DriverError, DriverRequest, OrchestrationCommand, PendingResume, ResumeAction, ResumeInput,
+    DriverError, DriverRequest, OrchestrationCommand, ResumeAction, ResumeInput,
     RunControlError, RunController, RunDriver, RunEvent, RunId, RunKernel, RunStarter, RunStore,
-    RunStoreError, RunView, StoreRunRecord, TimerStore, TimerStoreError, WaitPointId, WaitStore,
-    WaitStoreError,
+    RunStoreError, RunView, StoreRunRecord, TimerStore, TimerStoreError, WaitPointId,
 };
 use skg_run_sqlite::SqliteRunStore;
 use std::collections::VecDeque;
@@ -301,26 +300,17 @@ impl RunController for SqliteDurableOrchestrator {
             return Err(RunControlError::WaitPointNotFound(wait_point.clone()));
         }
 
-        self.store
-            .save_resume(PendingResume::new(
-                run_id.clone(),
-                wait_point.clone(),
-                input,
-            ))
-            .await
-            .map_err(map_wait_store_error)?;
-        let resume = self
-            .store
-            .take_resume(run_id, wait_point)
-            .await
-            .map_err(map_wait_store_error)?
-            .ok_or_else(|| RunControlError::WaitPointNotFound(wait_point.clone()))?;
+        // Resume submission on this in-process controller is synchronous: we
+        // advance durable run state directly from the caller-provided input
+        // instead of persisting then immediately consuming a queued resume.
+        // That avoids accepting a resume and deleting it before the run state
+        // transition is durably recorded.
 
         self.process_event(
             Some(record),
             RunEvent::Resume {
                 wait_point: wait_point.clone(),
-                input: resume.input,
+                input,
                 action: ResumeAction::Continue,
             },
         )
@@ -343,12 +333,6 @@ fn map_run_store_error(error: RunStoreError) -> RunControlError {
     }
 }
 
-fn map_wait_store_error(error: WaitStoreError) -> RunControlError {
-    match error {
-        WaitStoreError::Conflict(message) => RunControlError::Conflict(message),
-        WaitStoreError::Backend(message) => RunControlError::Backend(message),
-    }
-}
 
 fn map_timer_store_error(error: TimerStoreError) -> RunControlError {
     match error {

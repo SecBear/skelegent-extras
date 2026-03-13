@@ -214,7 +214,7 @@ impl GrpcTemporalClient {
     pub(crate) async fn connect(
         config: &super::config::TemporalConfig,
     ) -> Result<Self, TemporalError> {
-        let channel = tonic::transport::Channel::from_shared(config.server_url.clone())
+        let channel = tonic::transport::Channel::from_shared(config.normalized_server_url())
             .map_err(|e| TemporalError::ConnectionFailed(e.to_string()))?
             .connect()
             .await

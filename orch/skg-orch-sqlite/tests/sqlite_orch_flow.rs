@@ -120,7 +120,7 @@ async fn orch() -> (SqliteDurableOrchestrator, Arc<SqliteRunStore>) {
 
 #[tokio::test]
 async fn start_wait_resume_query_and_complete() {
-    let (orch, _run_store) = orch().await;
+    let (orch, run_store) = orch().await;
 
     let run_id = orch
         .start_operator_run(OperatorId::new("approval"), json!({ "ticket": 7 }))
@@ -151,6 +151,17 @@ async fn start_wait_resume_query_and_complete() {
     )
     .await
     .expect("resume waiting run");
+
+    // Synchronous resume goes straight into the durable run transition rather
+    // than persisting then consuming a queued resume row.
+    assert!(
+        run_store
+            .take_resume(&run_id, &wait_point)
+            .await
+            .expect("inspect pending resumes after resume")
+            .is_none(),
+        "resume_run should not leave a queued pending resume behind"
+    );
 
     let completed = orch.get_run(&run_id).await.expect("query completed run");
     match completed {

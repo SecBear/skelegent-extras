@@ -584,13 +584,7 @@ impl TemporalRunControlClient {
 
 #[cfg(feature = "temporal-sdk")]
 fn temporal_server_url(config: &TemporalConfig) -> Result<Url, url::ParseError> {
-    let server = config.server_url.trim();
-    let normalized = if server.contains("://") {
-        server.to_string()
-    } else {
-        format!("http://{server}")
-    };
-    Url::parse(&normalized)
+    Url::parse(&config.normalized_server_url())
 }
 
 #[cfg(feature = "temporal-sdk")]
