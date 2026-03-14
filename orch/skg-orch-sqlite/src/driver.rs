@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use layer0::operator::TriggerType;
-use layer0::{Content, Effect, ExitReason, Operator, OperatorId, OperatorInput};
+use layer0::{Content, DispatchContext, Effect, ExitReason, Operator, OperatorInput};
 use layer0::dispatch::EffectEmitter;
+use layer0::id::{DispatchId, OperatorId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use skg_run_core::{
@@ -215,7 +216,8 @@ impl RunDriver for SqliteRunDriver {
         let (operator_id, payload_value, backend_ref) = self.resolve_dispatch(&request)?;
         let operator = self.operator_for(&operator_id)?;
         let input = self.build_operator_input(&request.run_id, &request.payload, payload_value)?;
-        let output = operator.execute(input, &EffectEmitter::noop()).await.map_err(|error| {
+        let ctx = DispatchContext::new(DispatchId::new(request.run_id.as_str()), operator_id.clone());
+        let output = operator.execute(input, &ctx, &EffectEmitter::noop()).await.map_err(|error| {
             DriverError::Backend(format!(
                 "execute operator {} for run {}: {error}",
                 operator_id, request.run_id

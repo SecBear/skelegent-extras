@@ -5,6 +5,7 @@
 //! is provided separately.
 
 use layer0::content::Content;
+use layer0::DispatchContext;
 use layer0::dispatch::Dispatcher;
 use layer0::effect::SignalPayload;
 use layer0::error::{OperatorError, OrchError};
@@ -174,8 +175,7 @@ async fn dispatch_many_partial_failure() {
 
     let ok_output = orch
         .dispatch(&OperatorId::new("ok"), simple_input("fine"))
-        .await
-        .and_then(|h| Ok(h));
+        .await;
     let bad_result = orch
         .dispatch(&OperatorId::new("bad"), simple_input("boom"))
         .await;
@@ -198,8 +198,8 @@ struct AlwaysFailOperator;
 
 #[async_trait::async_trait]
 impl Operator for AlwaysFailOperator {
-    async fn execute(&self, _input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
-        Err(OperatorError::NonRetryable("intentional failure".into()))
+    async fn execute(&self, _input: OperatorInput, _ctx: &DispatchContext, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
+        Err(OperatorError::non_retryable("intentional failure"))
     }
 }
 

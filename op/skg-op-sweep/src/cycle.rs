@@ -35,8 +35,7 @@ use async_trait::async_trait;
 use layer0::operator::TriggerType;
 use layer0::dispatch::Dispatcher;
 use layer0::{
-    OperatorId, Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput,
-};
+    OperatorId, Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, DispatchContext};
 use layer0::dispatch::EffectEmitter;
 use skg_orch_compose::{
     dispatch_typed, BudgetDecision, BudgetPolicy, BudgetTracker, CompositionTrace, DispatchError,
@@ -388,15 +387,15 @@ impl<B: BudgetPolicy> SweepCycleOperator<B> {
 
 #[async_trait]
 impl<B: BudgetPolicy + 'static> Operator for SweepCycleOperator<B> {
-    async fn execute(&self, input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _ctx: &DispatchContext, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         let text = input.message.as_text().ok_or_else(|| {
-            OperatorError::NonRetryable(
-                "SweepCycleOperator: input.message must be JSON text".into(),
+            OperatorError::non_retryable(
+                "SweepCycleOperator: input.message must be JSON text",
             )
         })?;
 
         let decisions: Vec<SweepDecision> = serde_json::from_str(text).map_err(|e| {
-            OperatorError::NonRetryable(format!(
+            OperatorError::non_retryable(format!(
                 "SweepCycleOperator: failed to parse Vec<SweepDecision>: {e}"
             ))
         })?;
@@ -412,10 +411,10 @@ impl<B: BudgetPolicy + 'static> Operator for SweepCycleOperator<B> {
             decisions,
         )
         .await
-        .map_err(|e| OperatorError::NonRetryable(e.to_string()))?;
+        .map_err(|e| OperatorError::non_retryable(e.to_string()))?;
 
         let report_json = serde_json::to_string(&report).map_err(|e| {
-            OperatorError::NonRetryable(format!(
+            OperatorError::non_retryable(format!(
                 "SweepCycleOperator: failed to serialize CycleReport: {e}"
             ))
         })?;

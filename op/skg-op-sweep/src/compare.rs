@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use layer0::context::{Message, Role};
 use layer0::operator::OperatorMetadata;
 use layer0::state::MemoryTier;
-use layer0::{Content, Effect, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, Scope};
+use layer0::{Content, Effect, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, Scope, DispatchContext};
 use layer0::dispatch::EffectEmitter;
 use skg_orch_compose::ScopedState;
 use skg_turn::infer::InferRequest;
@@ -260,7 +260,7 @@ impl<P: Provider> CompareOperator<P> {
 
 #[async_trait::async_trait]
 impl<P: Provider + 'static> Operator for CompareOperator<P> {
-    async fn execute(&self, input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _ctx: &DispatchContext, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         let start = Instant::now();
 
         // Parse the typed input — both research results and decision_id come
@@ -269,13 +269,12 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
             .message
             .as_text()
             .ok_or_else(|| {
-                OperatorError::NonRetryable(
-                    "CompareOperator: input.message must be text containing CompareInput JSON"
-                        .into(),
+                OperatorError::non_retryable(
+                    "CompareOperator: input.message must be text containing CompareInput JSON",
                 )
             })?;
         let compare_in: CompareInput = serde_json::from_str(msg_text).map_err(|e| {
-            OperatorError::NonRetryable(format!(
+            OperatorError::non_retryable(format!(
                 "CompareOperator: failed to parse CompareInput: {e}"
             ))
         })?;
@@ -347,13 +346,13 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
 
         let response = self.llm.infer(request).await.map_err(|e| match e {
             ProviderError::RateLimited => {
-                OperatorError::Retryable("rate limited by LLM provider".into())
+                OperatorError::retryable("rate limited by LLM provider")
             }
-            ProviderError::TransientError { message, .. } => OperatorError::Retryable(message),
+            ProviderError::TransientError { message, .. } => OperatorError::retryable(message),
             ProviderError::AuthFailed(msg) => {
-                OperatorError::NonRetryable(format!("auth: {msg}"))
+                OperatorError::non_retryable(format!("auth: {msg}"))
             }
-            other => OperatorError::Model(other.to_string()),
+            other => OperatorError::model(other.to_string()),
         })?;
 
         // Extract text content from the LLM response.
@@ -381,7 +380,7 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
         let verdict: SweepVerdict = {
             let json_str = extract_json_block(raw);
             serde_json::from_str(json_str).map_err(|e| {
-                OperatorError::Model(format!(
+                OperatorError::model(format!(
                     "CompareOperator: failed to parse LLM verdict JSON: {e}\nRaw: {raw}"
                 ))
             })?
@@ -473,6 +472,7 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use layer0::{DispatchId, OperatorId};
     use crate::types::{EvidenceItem, EvidenceStance, ProcessorTier};
     use layer0::operator::TriggerType;
     use layer0::StateError;
@@ -699,7 +699,7 @@ mod tests {
         let msg = serde_json::to_string(&compare_in).unwrap();
         let input = OperatorInput::new(Content::text(msg), TriggerType::Task);
 
-        let output = op.execute(input, &EffectEmitter::noop()).await.expect("execute should succeed");
+        let output = op.execute(input, &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.expect("execute should succeed");
         let text = output.message.as_text().expect("output should be text");
         let verdict: SweepVerdict =
             serde_json::from_str(text).expect("output should be valid SweepVerdict JSON");
@@ -722,7 +722,7 @@ mod tests {
         let msg = serde_json::to_string(&compare_in).unwrap();
         let input = OperatorInput::new(Content::text(msg), TriggerType::Task);
 
-        op.execute(input, &EffectEmitter::noop()).await.expect("execute should succeed");
+        op.execute(input, &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.expect("execute should succeed");
 
         // Verify the meta key was written to own-scope state.
         let writes = state_ref.recorded_writes();
@@ -748,7 +748,7 @@ mod tests {
         let msg = serde_json::to_string(&compare_in).unwrap();
         let input = OperatorInput::new(Content::text(msg), TriggerType::Task);
 
-        let output = op.execute(input, &EffectEmitter::noop()).await.expect("execute should succeed");
+        let output = op.execute(input, &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.expect("execute should succeed");
 
         // Expect exactly 1 cross-scope effect: the delta WriteMemory.
         assert_eq!(

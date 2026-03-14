@@ -18,7 +18,7 @@ use layer0::content::Content;
 use layer0::context::{Message, Role};
 use layer0::operator::OperatorMetadata;
 use layer0::state::MemoryTier;
-use layer0::{Effect, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, Scope};
+use layer0::{Effect, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, Scope, DispatchContext};
 use layer0::dispatch::EffectEmitter;
 use skg_orch_compose::ScopedState;
 use skg_turn::infer::InferRequest;
@@ -191,15 +191,15 @@ impl<P: Provider> CompareOperator<P> {
 
 #[async_trait]
 impl<P: Provider + 'static> Operator for CompareOperator<P> {
-    async fn execute(&self, input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _ctx: &DispatchContext, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         let start = Instant::now();
 
         // Parse typed input.
         let msg_text = input.message.as_text().ok_or_else(|| {
-            OperatorError::NonRetryable("CompareOperator: input must be text JSON".into())
+            OperatorError::non_retryable("CompareOperator: input must be text JSON")
         })?;
         let compare_in: CompareInput = serde_json::from_str(msg_text).map_err(|e| {
-            OperatorError::NonRetryable(format!("CompareOperator: parse error: {e}"))
+            OperatorError::non_retryable(format!("CompareOperator: parse error: {e}"))
         })?;
         let research_json = serde_json::to_string(&compare_in.research_results)
             .unwrap_or_else(|_| "[]".to_string());
@@ -272,13 +272,13 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
 
         let response = self.llm.infer(request).await.map_err(|e| match e {
             ProviderError::RateLimited => {
-                OperatorError::Retryable("rate limited by LLM provider".into())
+                OperatorError::retryable("rate limited by LLM provider")
             }
-            ProviderError::TransientError { message, .. } => OperatorError::Retryable(message),
+            ProviderError::TransientError { message, .. } => OperatorError::retryable(message),
             ProviderError::AuthFailed(msg) => {
-                OperatorError::NonRetryable(format!("auth: {msg}"))
+                OperatorError::non_retryable(format!("auth: {msg}"))
             }
-            other => OperatorError::Model(other.to_string()),
+            other => OperatorError::model(other.to_string()),
         })?;
 
         // InferResponse.content is already Content — no conversion needed.
@@ -298,7 +298,7 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
         let mut verdict: SweepVerdict = {
             let json_str = extract_json_block(raw);
             serde_json::from_str(json_str).map_err(|e| {
-                OperatorError::NonRetryable(format!(
+                OperatorError::non_retryable(format!(
                     "compare: verdict parse failed: {e}\nraw:\n{raw}"
                 ))
             })?
@@ -359,6 +359,7 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use layer0::{DispatchId, OperatorId};
     use skg_turn::infer::InferResponse;
     use skg_turn::test_utils::TestProvider;
     use skg_turn::types::{StopReason, TokenUsage};
@@ -445,7 +446,7 @@ mod tests {
             Content::text(&input_json),
             layer0::operator::TriggerType::Task,
         );
-        let output = op.execute(input, &EffectEmitter::noop()).await.unwrap();
+        let output = op.execute(input, &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.unwrap();
 
         assert_eq!(output.exit_reason, ExitReason::Complete);
         let result: SweepVerdict =

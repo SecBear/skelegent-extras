@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use layer0::{
-    Content, Effect, ExitReason, Operator, OperatorError, OperatorId, OperatorInput,
+    Content, DispatchContext, Effect, ExitReason, Operator, OperatorError, OperatorId, OperatorInput,
     OperatorOutput, Scope,
 };
 use layer0::dispatch::EffectEmitter;
@@ -48,7 +48,7 @@ struct ApprovalOperator;
 
 #[async_trait]
 impl Operator for ApprovalOperator {
-    async fn execute(&self, input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _ctx: &DispatchContext, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         let payload = input_payload(&input);
 
         if payload.get("approved") == Some(&json!(true)) {
@@ -72,7 +72,7 @@ struct UnsupportedEffectOnResumeOperator;
 
 #[async_trait]
 impl Operator for UnsupportedEffectOnResumeOperator {
-    async fn execute(&self, input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _ctx: &DispatchContext, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         let payload = input_payload(&input);
 
         if payload.get("approved") == Some(&json!(true)) {
@@ -99,7 +99,7 @@ struct TimedWaitOnResumeOperator;
 
 #[async_trait]
 impl Operator for TimedWaitOnResumeOperator {
-    async fn execute(&self, input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _ctx: &DispatchContext, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         let payload = input_payload(&input);
 
         if payload.get("approved") == Some(&json!(true)) {

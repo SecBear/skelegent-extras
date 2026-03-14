@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use layer0::context::{Message, Role};
 use layer0::duration::DurationMs;
 use layer0::operator::OperatorMetadata;
-use layer0::{Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput};
+use layer0::{Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, DispatchContext};
 use layer0::dispatch::EffectEmitter;
 use skg_orch_compose::ScopedState;
 use skg_turn::infer::InferRequest;
@@ -73,11 +73,11 @@ fn extract_json_block(raw: &str) -> &str {
 fn map_provider_err(e: ProviderError) -> OperatorError {
     match e {
         ProviderError::RateLimited => {
-            OperatorError::Retryable("rate limited by LLM provider".into())
+            OperatorError::retryable("rate limited by LLM provider")
         }
-        ProviderError::TransientError { message, .. } => OperatorError::Retryable(message),
-        ProviderError::AuthFailed(msg) => OperatorError::NonRetryable(format!("auth: {msg}")),
-        other => OperatorError::Model(other.to_string()),
+        ProviderError::TransientError { message, .. } => OperatorError::retryable(message),
+        ProviderError::AuthFailed(msg) => OperatorError::non_retryable(format!("auth: {msg}")),
+        other => OperatorError::model(other.to_string()),
     }
 }
 
@@ -197,7 +197,7 @@ impl<P: Provider> SynthesisOperator<P> {
 
 #[async_trait]
 impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
-    async fn execute(&self, input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _ctx: &DispatchContext, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         let start = Instant::now();
         let mut total_tokens_in: u64 = 0;
         let mut total_tokens_out: u64 = 0;
@@ -205,13 +205,12 @@ impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
 
         // --- Parse typed input ---
         let msg_text = input.message.as_text().ok_or_else(|| {
-            OperatorError::NonRetryable(
-                "SynthesisOperator: input.message must be text containing SynthesisInput JSON"
-                    .into(),
+            OperatorError::non_retryable(
+                "SynthesisOperator: input.message must be text containing SynthesisInput JSON",
             )
         })?;
         let synthesis_in: SynthesisInput = serde_json::from_str(msg_text).map_err(|e| {
-            OperatorError::NonRetryable(format!(
+            OperatorError::non_retryable(format!(
                 "SynthesisOperator: failed to parse SynthesisInput: {e}"
             ))
         })?;
@@ -248,7 +247,7 @@ impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
         let all_flags: Vec<FlaggedItem> = {
             let json_str = extract_json_block(pass1_raw);
             serde_json::from_str(json_str).map_err(|e| {
-                OperatorError::Model(format!(
+                OperatorError::model(format!(
                     "SynthesisOperator: failed to parse Pass 1 flags: {e}\nRaw: {pass1_raw}"
                 ))
             })?
@@ -324,7 +323,7 @@ impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
                 Ok(Pass2Result::Structural(sc)) => structural_changes.push(sc),
                 Ok(Pass2Result::Candidate(cd)) => candidates.push(cd),
                 Err(e) => {
-                    return Err(OperatorError::Model(format!(
+                    return Err(OperatorError::model(format!(
                         "SynthesisOperator: failed to parse Pass 2 result: {e}\nRaw: {pass2_raw}"
                     )));
                 }
@@ -385,6 +384,7 @@ impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use layer0::{DispatchId, OperatorId};
     use crate::synthesis::StructuralChangeType;
     use crate::types::{EvidenceItem, EvidenceStance, ProcessorTier, VerdictStatus};
     use layer0::operator::TriggerType;
@@ -535,7 +535,7 @@ mod tests {
         let op = SynthesisOperator::new(provider, Arc::new(MockState), SynthesisConfig::default());
 
         let input = OperatorInput::new(Content::text(synthesis_input_json(2)), TriggerType::Task);
-        let output = op.execute(input, &EffectEmitter::noop()).await.expect("execute should succeed");
+        let output = op.execute(input, &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.expect("execute should succeed");
 
         let text = output.message.as_text().expect("output should be text");
         let report: SynthesisReport =
@@ -558,7 +558,7 @@ mod tests {
         let op = SynthesisOperator::new(provider, Arc::new(MockState), SynthesisConfig::default());
 
         let input = OperatorInput::new(Content::text(synthesis_input_json(2)), TriggerType::Task);
-        let output = op.execute(input, &EffectEmitter::noop()).await.expect("execute should succeed");
+        let output = op.execute(input, &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.expect("execute should succeed");
 
         let text = output.message.as_text().expect("output should be text");
         let report: SynthesisReport =
@@ -587,7 +587,7 @@ mod tests {
         let op = SynthesisOperator::new(provider, Arc::new(MockState), config);
 
         let input = OperatorInput::new(Content::text(synthesis_input_json(2)), TriggerType::Task);
-        let output = op.execute(input, &EffectEmitter::noop()).await.expect("execute should succeed");
+        let output = op.execute(input, &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.expect("execute should succeed");
 
         let text = output.message.as_text().expect("output should be text");
         let report: SynthesisReport =

@@ -109,7 +109,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use layer0::{
-        ExitReason, OrchError, dispatch::{Dispatcher, DispatchEvent, DispatchHandle, DispatchSender},
+        ExitReason, OrchError, dispatch::{Dispatcher, DispatchEvent, DispatchHandle},
     };
     use layer0::id::DispatchId;
     use serde::{Deserialize, Serialize};

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use layer0::{Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput};
+use layer0::{Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, DispatchContext};
 use layer0::dispatch::EffectEmitter;
 use tracing::{debug, info};
 
@@ -37,10 +37,10 @@ impl<R: ResearchSource> ResearchOperator<R> {
 
 #[async_trait]
 impl<R: ResearchSource> Operator for ResearchOperator<R> {
-    async fn execute(&self, input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _ctx: &DispatchContext, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         let text = input.message.as_text().unwrap_or("{}");
         let req: ResearchInput = serde_json::from_str(text).map_err(|e| {
-            OperatorError::NonRetryable(format!("ResearchOperator: invalid input: {e}"))
+            OperatorError::non_retryable(format!("ResearchOperator: invalid input: {e}"))
         })?;
 
         info!(
@@ -56,10 +56,10 @@ impl<R: ResearchSource> Operator for ResearchOperator<R> {
         let results: Vec<ResearchResult> = match req.mode {
             ResearchMode::Search => {
                 self.source.search(&req.query).await.map_err(|e| match e {
-                    SweepError::Transient(msg) => OperatorError::Retryable(format!(
+                    SweepError::Transient(msg) => OperatorError::retryable(format!(
                         "ResearchOperator: transient search error: {msg}"
                     )),
-                    other => OperatorError::NonRetryable(format!(
+                    other => OperatorError::non_retryable(format!(
                         "ResearchOperator: search error: {other}"
                     )),
                 })?
@@ -69,10 +69,10 @@ impl<R: ResearchSource> Operator for ResearchOperator<R> {
                     .deep_research(&req.query, &req.processor)
                     .await
                     .map_err(|e| match e {
-                        SweepError::Transient(msg) => OperatorError::Retryable(format!(
+                        SweepError::Transient(msg) => OperatorError::retryable(format!(
                             "ResearchOperator: transient deep error: {msg}"
                         )),
-                        other => OperatorError::NonRetryable(format!(
+                        other => OperatorError::non_retryable(format!(
                             "ResearchOperator: deep error: {other}"
                         )),
                     })?
@@ -104,7 +104,7 @@ impl<R: ResearchSource> Operator for ResearchOperator<R> {
         }
 
         let body = serde_json::to_string(&results).map_err(|e| {
-            OperatorError::NonRetryable(format!("ResearchOperator: serialize error: {e}"))
+            OperatorError::non_retryable(format!("ResearchOperator: serialize error: {e}"))
         })?;
 
         Ok(OperatorOutput::new(Content::text(body), ExitReason::Complete))
@@ -114,6 +114,7 @@ impl<R: ResearchSource> Operator for ResearchOperator<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use layer0::{DispatchId, OperatorId};
     use crate::provider::ResearchResult;
     use layer0::operator::TriggerType;
 
@@ -165,7 +166,7 @@ mod tests {
     #[tokio::test]
     async fn search_mode_returns_results() {
         let op = ResearchOperator::new(make_source(3));
-        let output = op.execute(make_input(ResearchMode::Search), &EffectEmitter::noop()).await.unwrap();
+        let output = op.execute(make_input(ResearchMode::Search), &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.unwrap();
         let results: Vec<ResearchResult> =
             serde_json::from_str(output.message.as_text().unwrap()).unwrap();
         assert_eq!(results.len(), 3);
@@ -175,7 +176,7 @@ mod tests {
     #[tokio::test]
     async fn deep_mode_returns_results() {
         let op = ResearchOperator::new(make_source(5));
-        let output = op.execute(make_input(ResearchMode::Deep), &EffectEmitter::noop()).await.unwrap();
+        let output = op.execute(make_input(ResearchMode::Deep), &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.unwrap();
         let results: Vec<ResearchResult> =
             serde_json::from_str(output.message.as_text().unwrap()).unwrap();
         assert_eq!(results.len(), 5);
@@ -185,14 +186,14 @@ mod tests {
     async fn invalid_input_returns_error() {
         let op = ResearchOperator::new(make_source(0));
         let input = OperatorInput::new(Content::text("not json"), TriggerType::Task);
-        let err = op.execute(input, &EffectEmitter::noop()).await.unwrap_err();
+        let err = op.execute(input, &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.unwrap_err();
         assert!(err.to_string().contains("invalid input"));
     }
 
     #[tokio::test]
     async fn empty_results_ok() {
         let op = ResearchOperator::new(make_source(0));
-        let output = op.execute(make_input(ResearchMode::Search), &EffectEmitter::noop()).await.unwrap();
+        let output = op.execute(make_input(ResearchMode::Search), &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.unwrap();
         let results: Vec<ResearchResult> =
             serde_json::from_str(output.message.as_text().unwrap()).unwrap();
         assert!(results.is_empty());
