@@ -10,8 +10,8 @@ use axum::routing::{get, post};
 use axum::Extension;
 use layer0::dispatch::Dispatcher;
 use layer0::id::OperatorId;
+use skg_a2a_core::push::PushNotificationStore;
 use skg_a2a_core::{AgentCard, TaskState};
-
 /// In-memory registry of active dispatches for A2A task operations.
 ///
 /// Maps task_id → cancel token + latest state. Entries are cleaned up
@@ -101,6 +101,8 @@ pub(crate) struct A2aServerState {
     #[allow(dead_code)] // Retained for agent card endpoint access.
     pub card: AgentCard,
     pub registry: DispatchRegistry,
+    pub push_store: Option<Arc<dyn PushNotificationStore>>,
+    pub auth_validator: Option<Arc<dyn skg_hook_security::auth::TokenValidator>>,
 }
 
 /// A2A protocol server wrapping skelegent dispatch.
@@ -110,6 +112,8 @@ pub struct A2aServer {
     dispatcher: Arc<dyn Dispatcher>,
     default_operator: OperatorId,
     card: AgentCard,
+    push_store: Option<Arc<dyn PushNotificationStore>>,
+    auth_validator: Option<Arc<dyn skg_hook_security::auth::TokenValidator>>,
 }
 
 impl A2aServer {
@@ -123,7 +127,25 @@ impl A2aServer {
             dispatcher,
             default_operator,
             card,
+            push_store: None,
+            auth_validator: None,
         }
+    }
+
+    /// Enable push notification support with the given store.
+    pub fn with_push(mut self, store: Arc<dyn PushNotificationStore>) -> Self {
+        self.push_store = Some(store);
+        self
+    }
+
+    /// Enable token-based authentication for JSON-RPC endpoints.
+    ///
+    /// When configured, all JSON-RPC requests must carry a valid
+    /// `Authorization: Bearer <token>` header. The `/.well-known/agent.json`
+    /// discovery endpoint remains public.
+    pub fn with_auth(mut self, validator: Arc<dyn skg_hook_security::auth::TokenValidator>) -> Self {
+        self.auth_validator = Some(validator);
+        self
     }
 
     /// Consume the builder and produce an [`axum::Router`].
@@ -139,6 +161,8 @@ impl A2aServer {
             default_operator: self.default_operator,
             card: self.card,
             registry: DispatchRegistry::new(),
+            push_store: self.push_store,
+            auth_validator: self.auth_validator,
         });
 
         axum::Router::new()
