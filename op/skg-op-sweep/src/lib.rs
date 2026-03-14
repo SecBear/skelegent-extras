@@ -1,3 +1,5 @@
+#![deprecated(since = "0.4.0", note = "Use skg-op-sweep-v2 instead")]
+#![allow(deprecated)]
 #![deny(missing_docs)]
 //! Sweep operator for architectural decision auditing.
 //!
@@ -11,13 +13,13 @@
 //!
 //! - **Operators** ([`CompareOperator`], [`SynthesisOperator`]) implement the
 //!   [`Operator`](layer0::Operator) trait and receive capabilities via constructor
-//!   injection. State access uses [`ScopedState`](skg_orch_kit::ScopedState)
+//!   injection. State access uses [`ScopedState`](skg_orch_compose::ScopedState)
 //!   for partition-isolated reads/writes.
 //!
 //! - **Composition** ([`run_sweep_cycle`]) is a plain async function that sequences
 //!   operator dispatches through a [`Dispatcher`](layer0::dispatch::Dispatcher), using
-//!   [`BudgetTracker`](skg_orch_kit::BudgetTracker) for cost enforcement and
-//!   [`CompositionTrace`](skg_orch_kit::CompositionTrace) for cycle detection.
+//!   [`BudgetTracker`](skg_orch_compose::BudgetTracker) for cost enforcement and
+//!   [`CompositionTrace`](skg_orch_compose::CompositionTrace) for cycle detection.
 //!
 //! - **Fractal promotion** ([`SweepCycleOperator`]) wraps the composition function
 //!   as an [`Operator`](layer0::Operator), enabling outer systems to dispatch entire

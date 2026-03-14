@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Sweep orchestrator for skelegent — priority scheduling, budget enforcement, and cycle management"
+description = "(DEPRECATED) Sweep orchestrator for skelegent — priority scheduling, budget enforcement, and cycle management. Use skg-op-sweep-v2 orchestration patterns instead."
 
 [dependencies]
 layer0 = { path = "../../../skelegent/layer0", version = "0.4.0" }
@@ -25,4 +25,4 @@ skg-effects-git = { path = "../../effects/skg-effects-git", version = "0.4.0" }
 
 skg-turn = { path = "../../../skelegent/turn/skg-turn", version = "0.4.0" }
 layer0 = { path = "../../../skelegent/layer0", version = "0.4.0", features = ["test-utils"] }
-skg-orch-kit = { path = "../skg-orch-kit", version = "0.1.0" }
+skg-orch-compose = { path = "../skg-orch-compose", version = "0.1.0" }

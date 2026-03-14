@@ -20,7 +20,7 @@ use layer0::operator::OperatorMetadata;
 use layer0::state::MemoryTier;
 use layer0::{Effect, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, Scope};
 use layer0::dispatch::EffectEmitter;
-use skg_orch_kit::ScopedState;
+use skg_orch_compose::ScopedState;
 use skg_turn::infer::InferRequest;
 use skg_turn::provider::{Provider, ProviderError};
 use rust_decimal::Decimal;

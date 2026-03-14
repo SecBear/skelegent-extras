@@ -38,7 +38,7 @@ use layer0::{
     OperatorId, Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput,
 };
 use layer0::dispatch::EffectEmitter;
-use skg_orch_kit::{
+use skg_orch_compose::{
     dispatch_typed, BudgetDecision, BudgetPolicy, BudgetTracker, CompositionTrace, DispatchError,
     ScopedState,
 };
@@ -445,8 +445,8 @@ mod tests {
         Scope,
     };
     use layer0::test_utils::InMemoryStore;
-    use skg_orch_kit::budget::{CapPolicy, NoLimitPolicy};
-    use skg_orch_kit::{BudgetTracker, CompositionTrace, ScopedStateView};
+    use skg_orch_compose::budget::{CapPolicy, NoLimitPolicy};
+    use skg_orch_compose::{BudgetTracker, CompositionTrace, ScopedStateView};
 
     use super::*;
     use crate::provider::ResearchResult;

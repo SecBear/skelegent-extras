@@ -4,7 +4,7 @@ members = [
   "op/skg-op-sweep",
   "op/skg-op-sweep-v2",
   "orch/skg-orch-sweep",
-  "orch/skg-orch-kit",
+  "orch/skg-orch-compose",
   "orch/skg-orch-temporal",
   "orch/skg-orch-sqlite",
   "state/skg-state-sqlite",

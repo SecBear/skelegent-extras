@@ -35,7 +35,7 @@ use layer0::content::Content;
 use layer0::context::{Message, Role};
 use layer0::{ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput};
 use layer0::dispatch::EffectEmitter;
-use skg_orch_kit::ScopedState;
+use skg_orch_compose::ScopedState;
 use skg_turn::infer::InferRequest;
 use skg_turn::provider::{Provider, ProviderError};
 use tracing::{debug, info};

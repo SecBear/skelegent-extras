@@ -4,10 +4,10 @@
 //! tiers — [`DegradationLevel::Normal`], [`DegradationLevel::Degraded`], and
 //! [`DegradationLevel::HardStop`] — to protect against runaway costs.
 //!
-//! # Relationship to `skg-orch-kit`
+//! # Relationship to `skg-orch-compose`
 //!
-//! `skg-orch-kit` provides a generic [`skg_orch_kit::BudgetTracker`] with
-//! atomic microdollar tracking and a [`skg_orch_kit::BudgetDecision`] enum.
+//! `skg-orch-compose` provides a generic [`skg_orch_compose::BudgetTracker`] with
+//! atomic microdollar tracking and a [`skg_orch_compose::BudgetDecision`] enum.
 //! The sweep budget is NOT migrated to use it because the two systems serve
 //! different concerns:
 //!

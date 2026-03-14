@@ -1,4 +1,4 @@
-//! # skg-orch-kit — Composition utilities for skelegent orchestration
+//! # skg-orch-compose — Composition utilities for skelegent orchestration
 //!
 //! This crate provides the building blocks for composing operators into
 //! application workflows:

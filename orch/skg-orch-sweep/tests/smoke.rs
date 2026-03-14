@@ -20,7 +20,7 @@ use skg_op_sweep::{
     CompareOperator, CompareConfig, EvidenceItem, EvidenceStance, ProcessorTier, ResearchResult,
     SweepVerdict, VerdictStatus, CompareInput,
 };
-use skg_orch_kit::{dispatch_typed, ScopedStateView};
+use skg_orch_compose::{dispatch_typed, ScopedStateView};
 use skg_orch_sweep::{
     BudgetConfig, BudgetState, CycleReport, OrchestratorConfig, QueuedDecision, run_cycle,
 };

@@ -34,7 +34,7 @@ use layer0::duration::DurationMs;
 use layer0::operator::OperatorMetadata;
 use layer0::{Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput};
 use layer0::dispatch::EffectEmitter;
-use skg_orch_kit::ScopedState;
+use skg_orch_compose::ScopedState;
 use skg_turn::infer::InferRequest;
 use skg_turn::provider::{Provider, ProviderError};
 use tracing::{debug, info};

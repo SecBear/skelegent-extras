@@ -1,5 +1,5 @@
 [package]
-name = "skg-orch-kit"
+name = "skg-orch-compose"
 version = "0.1.0"
 description = "Composition utilities for skelegent orchestration — scoped state, typed dispatch, budget tracking, tracing, and effect middleware."
 edition.workspace = true

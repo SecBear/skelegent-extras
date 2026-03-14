@@ -1,3 +1,5 @@
+#![deprecated(since = "0.4.0", note = "Use skg-op-sweep-v2 orchestration patterns instead")]
+#![allow(deprecated)]
 #![deny(missing_docs)]
 //! Sweep orchestrator for architectural decision auditing.
 //!
