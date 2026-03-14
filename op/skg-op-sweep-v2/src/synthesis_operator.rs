@@ -34,6 +34,7 @@ use layer0::operator::OperatorMetadata;
 use layer0::content::Content;
 use layer0::context::{Message, Role};
 use layer0::{ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput};
+use layer0::dispatch::EffectEmitter;
 use skg_orch_kit::ScopedState;
 use skg_turn::infer::InferRequest;
 use skg_turn::provider::{Provider, ProviderError};
@@ -197,7 +198,7 @@ impl<P: Provider> SynthesisOperator<P> {
 
 #[async_trait]
 impl<P: Provider + 'static> Operator for SynthesisOperator<P> {
-    async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         let start = Instant::now();
         let mut total_tokens_in: u64 = 0;
         let mut total_tokens_out: u64 = 0;
@@ -567,7 +568,7 @@ mod tests {
         let op = SynthesisOperator::new(provider, Arc::new(MockState), SynthesisConfig::default());
 
         let input = OperatorInput::new(Content::text(synthesis_input_json(2)), TriggerType::Task);
-        let output = op.execute(input).await.expect("execute should succeed");
+        let output = op.execute(input, &EffectEmitter::noop()).await.expect("execute should succeed");
 
         let text = output.message.as_text().expect("output should be text");
         let report: SynthesisReport =
@@ -596,7 +597,7 @@ mod tests {
         let op = SynthesisOperator::new(provider, Arc::new(MockState), SynthesisConfig::default());
 
         let input = OperatorInput::new(Content::text(synthesis_input_json(2)), TriggerType::Task);
-        let output = op.execute(input).await.expect("execute should succeed");
+        let output = op.execute(input, &EffectEmitter::noop()).await.expect("execute should succeed");
 
         let text = output.message.as_text().expect("output should be text");
         let report: SynthesisReport =
@@ -637,7 +638,7 @@ mod tests {
         let op = SynthesisOperator::new(provider, Arc::new(MockState), config);
 
         let input = OperatorInput::new(Content::text(synthesis_input_json(2)), TriggerType::Task);
-        let output = op.execute(input).await.expect("execute should succeed");
+        let output = op.execute(input, &EffectEmitter::noop()).await.expect("execute should succeed");
 
         let text = output.message.as_text().expect("output should be text");
         let report: SynthesisReport =

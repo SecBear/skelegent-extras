@@ -19,6 +19,7 @@ use layer0::context::{Message, Role};
 use layer0::operator::OperatorMetadata;
 use layer0::state::MemoryTier;
 use layer0::{Effect, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, Scope};
+use layer0::dispatch::EffectEmitter;
 use skg_orch_kit::ScopedState;
 use skg_turn::infer::InferRequest;
 use skg_turn::provider::{Provider, ProviderError};
@@ -190,7 +191,7 @@ impl<P: Provider> CompareOperator<P> {
 
 #[async_trait]
 impl<P: Provider + 'static> Operator for CompareOperator<P> {
-    async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         let start = Instant::now();
 
         // Parse typed input.
@@ -444,7 +445,7 @@ mod tests {
             Content::text(&input_json),
             layer0::operator::TriggerType::Task,
         );
-        let output = op.execute(input).await.unwrap();
+        let output = op.execute(input, &EffectEmitter::noop()).await.unwrap();
 
         assert_eq!(output.exit_reason, ExitReason::Complete);
         let result: SweepVerdict =

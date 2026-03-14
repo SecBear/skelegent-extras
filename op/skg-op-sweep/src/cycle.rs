@@ -37,6 +37,7 @@ use layer0::dispatch::Dispatcher;
 use layer0::{
     OperatorId, Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput,
 };
+use layer0::dispatch::EffectEmitter;
 use skg_orch_kit::{
     dispatch_typed, BudgetDecision, BudgetPolicy, BudgetTracker, CompositionTrace, DispatchError,
     ScopedState,
@@ -387,7 +388,7 @@ impl<B: BudgetPolicy> SweepCycleOperator<B> {
 
 #[async_trait]
 impl<B: BudgetPolicy + 'static> Operator for SweepCycleOperator<B> {
-    async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         let text = input.message.as_text().ok_or_else(|| {
             OperatorError::NonRetryable(
                 "SweepCycleOperator: input.message must be JSON text".into(),

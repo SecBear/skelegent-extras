@@ -11,6 +11,7 @@ use layer0::error::{OperatorError, OrchError};
 use layer0::id::{OperatorId, WorkflowId};
 use layer0::operator::{ExitReason, Operator, OperatorInput, OperatorOutput, TriggerType};
 use layer0::test_utils::EchoOperator;
+use layer0::dispatch::EffectEmitter;
 use skg_effects_core::{QueryPayload, Queryable, Signalable};
 use skg_orch_temporal::{RetryPolicy, TemporalConfig, TemporalOrch};
 use skg_run_core::{ResumeInput, RunController, RunStarter, RunStatus, RunView, WaitReason};
@@ -197,7 +198,7 @@ struct AlwaysFailOperator;
 
 #[async_trait::async_trait]
 impl Operator for AlwaysFailOperator {
-    async fn execute(&self, _input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, _input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         Err(OperatorError::NonRetryable("intentional failure".into()))
     }
 }

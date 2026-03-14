@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use layer0::operator::{Operator, OperatorInput};
+use layer0::dispatch::EffectEmitter;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -178,7 +179,7 @@ impl TemporalClient for MockTemporalClient {
 
         // ── 4. Execute (async; all locks released) ─────────────────────────
         let output = op
-            .execute(operator_input)
+            .execute(operator_input, &EffectEmitter::noop())
             .await
             .map_err(|e| TemporalError::Other(e.to_string()))?;
 

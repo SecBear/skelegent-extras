@@ -19,6 +19,7 @@ use layer0::context::{Message, Role};
 use layer0::operator::OperatorMetadata;
 use layer0::state::MemoryTier;
 use layer0::{Content, Effect, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, Scope};
+use layer0::dispatch::EffectEmitter;
 use skg_orch_kit::ScopedState;
 use skg_turn::infer::InferRequest;
 use skg_turn::provider::{Provider, ProviderError};
@@ -259,7 +260,7 @@ impl<P: Provider> CompareOperator<P> {
 
 #[async_trait::async_trait]
 impl<P: Provider + 'static> Operator for CompareOperator<P> {
-    async fn execute(&self, input: OperatorInput) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
         let start = Instant::now();
 
         // Parse the typed input — both research results and decision_id come
@@ -698,7 +699,7 @@ mod tests {
         let msg = serde_json::to_string(&compare_in).unwrap();
         let input = OperatorInput::new(Content::text(msg), TriggerType::Task);
 
-        let output = op.execute(input).await.expect("execute should succeed");
+        let output = op.execute(input, &EffectEmitter::noop()).await.expect("execute should succeed");
         let text = output.message.as_text().expect("output should be text");
         let verdict: SweepVerdict =
             serde_json::from_str(text).expect("output should be valid SweepVerdict JSON");
@@ -721,7 +722,7 @@ mod tests {
         let msg = serde_json::to_string(&compare_in).unwrap();
         let input = OperatorInput::new(Content::text(msg), TriggerType::Task);
 
-        op.execute(input).await.expect("execute should succeed");
+        op.execute(input, &EffectEmitter::noop()).await.expect("execute should succeed");
 
         // Verify the meta key was written to own-scope state.
         let writes = state_ref.recorded_writes();
@@ -747,7 +748,7 @@ mod tests {
         let msg = serde_json::to_string(&compare_in).unwrap();
         let input = OperatorInput::new(Content::text(msg), TriggerType::Task);
 
-        let output = op.execute(input).await.expect("execute should succeed");
+        let output = op.execute(input, &EffectEmitter::noop()).await.expect("execute should succeed");
 
         // Expect exactly 1 cross-scope effect: the delta WriteMemory.
         assert_eq!(
