@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use layer0::{
-    Effect, OperatorId, OperatorInput, OrchError,
+    DispatchContext, Effect, OperatorInput, OrchError,
     dispatch::{Dispatcher, DispatchEvent, DispatchHandle},
 };
 use std::sync::Arc;
@@ -48,10 +48,10 @@ impl MiddlewareDispatcher {
 impl Dispatcher for MiddlewareDispatcher {
     async fn dispatch(
         &self,
-        operator: &OperatorId,
+        ctx: &DispatchContext,
         input: OperatorInput,
     ) -> Result<DispatchHandle, OrchError> {
-        let mut inner_handle = self.inner.dispatch(operator, input).await?;
+        let mut inner_handle = self.inner.dispatch(ctx, input).await?;
         let middlewares: Vec<Arc<dyn EffectMiddleware>> = self.middlewares.clone();
         let (handle, sender) = DispatchHandle::channel(inner_handle.id.clone());
         tokio::spawn(async move {
@@ -93,7 +93,7 @@ mod tests {
     impl Dispatcher for EffectDispatcher {
         async fn dispatch(
             &self,
-            _operator: &OperatorId,
+            _ctx: &DispatchContext,
             _input: OperatorInput,
         ) -> Result<DispatchHandle, OrchError> {
             let output = {
@@ -201,9 +201,9 @@ mod tests {
             effects: vec![write_effect("key1", "value1")],
         });
         let mw = MiddlewareDispatcher::new(inner, vec![Arc::new(IdentityMiddleware)]);
-        let operator = OperatorId::new("test");
+        let ctx = DispatchContext::new(layer0::id::DispatchId::new("test"), layer0::OperatorId::new("test"));
 
-        let output = mw.dispatch(&operator, make_input()).await.unwrap().collect().await.unwrap();
+        let output = mw.dispatch(&ctx, make_input()).await.unwrap().collect().await.unwrap();
         assert_eq!(output.effects.len(), 1);
 
         if let Effect::WriteMemory { key, value, .. } = &output.effects[0] {
@@ -220,9 +220,9 @@ mod tests {
             effects: vec![write_effect("secret", "password123")],
         });
         let mw = MiddlewareDispatcher::new(inner, vec![Arc::new(RedactMiddleware)]);
-        let operator = OperatorId::new("test");
+        let ctx = DispatchContext::new(layer0::id::DispatchId::new("test"), layer0::OperatorId::new("test"));
 
-        let output = mw.dispatch(&operator, make_input()).await.unwrap().collect().await.unwrap();
+        let output = mw.dispatch(&ctx, make_input()).await.unwrap().collect().await.unwrap();
 
         if let Effect::WriteMemory { key, value, .. } = &output.effects[0] {
             assert_eq!(key, "secret");
@@ -248,9 +248,9 @@ mod tests {
                 Arc::new(RedactMiddleware),
             ],
         );
-        let operator = OperatorId::new("test");
+        let ctx = DispatchContext::new(layer0::id::DispatchId::new("test"), layer0::OperatorId::new("test"));
 
-        let output = mw.dispatch(&operator, make_input()).await.unwrap().collect().await.unwrap();
+        let output = mw.dispatch(&ctx, make_input()).await.unwrap().collect().await.unwrap();
 
         if let Effect::WriteMemory { key, value, .. } = &output.effects[0] {
             assert_eq!(key, "SECRET");

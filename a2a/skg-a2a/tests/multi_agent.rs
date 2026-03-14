@@ -8,6 +8,7 @@ use layer0::content::Content;
 use layer0::dispatch::{DispatchEvent, DispatchHandle, Dispatcher};
 use layer0::error::OrchError;
 use layer0::id::{DispatchId, OperatorId};
+use layer0::DispatchContext;
 use layer0::operator::{ExitReason, OperatorInput, OperatorOutput};
 use skg_a2a::client::A2aDispatcher;
 use skg_a2a::server::A2aServer;
@@ -34,7 +35,7 @@ impl EchoDispatcher {
 impl Dispatcher for EchoDispatcher {
     async fn dispatch(
         &self,
-        _operator: &OperatorId,
+        _ctx: &DispatchContext,
         input: OperatorInput,
     ) -> Result<DispatchHandle, OrchError> {
         let text = input.message.as_text().unwrap_or("(empty)").to_owned();
@@ -58,7 +59,7 @@ struct DelegatingDispatcher {
 impl Dispatcher for DelegatingDispatcher {
     async fn dispatch(
         &self,
-        _operator: &OperatorId,
+        ctx: &DispatchContext,
         input: OperatorInput,
     ) -> Result<DispatchHandle, OrchError> {
         let text = input.message.as_text().unwrap_or("(empty)").to_owned();
@@ -67,7 +68,8 @@ impl Dispatcher for DelegatingDispatcher {
         let remote_input = OperatorInput::new(tagged, layer0::operator::TriggerType::User);
 
         // Dispatch to remote agent via A2A — it's just a Dispatcher
-        self.remote.dispatch(&OperatorId::new("remote"), remote_input).await
+        let child_ctx = ctx.child(DispatchId::new("remote"), OperatorId::new("remote"));
+        self.remote.dispatch(&child_ctx, remote_input).await
     }
 }
 
@@ -145,7 +147,7 @@ async fn multi_agent_delegation() {
         layer0::operator::TriggerType::User,
     );
     let output = client
-        .dispatch(&OperatorId::new("any"), input)
+        .dispatch(&DispatchContext::new(DispatchId::new("any"), OperatorId::new("any")), input)
         .await
         .expect("dispatch failed")
         .collect()
@@ -187,7 +189,7 @@ async fn three_agent_chain() {
         layer0::operator::TriggerType::User,
     );
     let output = client
-        .dispatch(&OperatorId::new("any"), input)
+        .dispatch(&DispatchContext::new(DispatchId::new("any"), OperatorId::new("any")), input)
         .await
         .expect("dispatch failed")
         .collect()

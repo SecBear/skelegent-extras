@@ -5,6 +5,7 @@ use layer0::content::Content;
 use layer0::dispatch::{DispatchEvent, DispatchHandle, Dispatcher};
 use layer0::error::OrchError;
 use layer0::id::{DispatchId, OperatorId};
+use layer0::DispatchContext;
 use layer0::operator::{ExitReason, OperatorInput, OperatorOutput};
 use skg_a2a::client::A2aDispatcher;
 use skg_a2a::server::A2aServer;
@@ -19,7 +20,7 @@ struct EchoDispatcher;
 impl Dispatcher for EchoDispatcher {
     async fn dispatch(
         &self,
-        _operator: &OperatorId,
+        _ctx: &DispatchContext,
         input: OperatorInput,
     ) -> Result<DispatchHandle, OrchError> {
         let text = input.message.as_text().unwrap_or("(empty)").to_owned();
@@ -85,7 +86,7 @@ async fn a2a_round_trip_echo() {
         layer0::operator::TriggerType::User,
     );
     let output = client
-        .dispatch(&OperatorId::new("ignored"), input)
+        .dispatch(&DispatchContext::new(DispatchId::new("ignored"), OperatorId::new("ignored")), input)
         .await
         .expect("dispatch failed")
         .collect()
@@ -114,7 +115,7 @@ async fn a2a_agent_card_discovery() {
         layer0::operator::TriggerType::User,
     );
     let output = client
-        .dispatch(&OperatorId::new("any"), input)
+        .dispatch(&DispatchContext::new(DispatchId::new("any"), OperatorId::new("any")), input)
         .await
         .expect("dispatch failed")
         .collect()
@@ -148,7 +149,7 @@ async fn a2a_multiblock_content() {
     );
 
     let output = client
-        .dispatch(&OperatorId::new("echo"), input)
+        .dispatch(&DispatchContext::new(DispatchId::new("echo"), OperatorId::new("echo")), input)
         .await
         .expect("dispatch failed")
         .collect()

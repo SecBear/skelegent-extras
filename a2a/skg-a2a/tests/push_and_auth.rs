@@ -5,6 +5,7 @@ use layer0::content::Content;
 use layer0::dispatch::{DispatchEvent, DispatchHandle, Dispatcher};
 use layer0::error::OrchError;
 use layer0::id::{DispatchId, OperatorId};
+use layer0::DispatchContext;
 use layer0::operator::{ExitReason, OperatorInput, OperatorOutput};
 use skg_a2a::server::A2aServer;
 use skg_a2a_core::jsonrpc::methods;
@@ -25,7 +26,7 @@ struct NoopDispatcher;
 impl Dispatcher for NoopDispatcher {
     async fn dispatch(
         &self,
-        _operator: &OperatorId,
+        _ctx: &DispatchContext,
         _input: OperatorInput,
     ) -> Result<DispatchHandle, OrchError> {
         let output = OperatorOutput::new(Content::text("ok"), ExitReason::Complete);

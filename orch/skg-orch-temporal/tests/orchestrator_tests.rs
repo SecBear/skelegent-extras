@@ -9,7 +9,7 @@ use layer0::DispatchContext;
 use layer0::dispatch::Dispatcher;
 use layer0::effect::SignalPayload;
 use layer0::error::{OperatorError, OrchError};
-use layer0::id::{OperatorId, WorkflowId};
+use layer0::id::{DispatchId, OperatorId, WorkflowId};
 use layer0::operator::{ExitReason, Operator, OperatorInput, OperatorOutput, TriggerType};
 use layer0::test_utils::EchoOperator;
 use layer0::dispatch::EffectEmitter;
@@ -112,7 +112,7 @@ async fn dispatch_single_operator() {
     orch.register(OperatorId::new("echo"), Arc::new(EchoOperator));
 
     let output = orch
-        .dispatch(&OperatorId::new("echo"), simple_input("hello"))
+        .dispatch(&DispatchContext::new(DispatchId::new("echo"), OperatorId::new("echo")), simple_input("hello"))
         .await
         .expect("dispatch should succeed")
         .collect()
@@ -128,7 +128,7 @@ async fn dispatch_unknown_agent_returns_error() {
     let orch = TemporalOrch::new(TemporalConfig::default());
 
     let result = orch
-        .dispatch(&OperatorId::new("ghost"), simple_input("x"))
+        .dispatch(&DispatchContext::new(DispatchId::new("ghost"), OperatorId::new("ghost")), simple_input("x"))
         .await;
     let err = match result {
         Err(e) => e,
@@ -149,14 +149,14 @@ async fn dispatch_many_all_succeed() {
     orch.register(OperatorId::new("b"), Arc::new(EchoOperator));
 
     let result_a = orch
-        .dispatch(&OperatorId::new("a"), simple_input("msg-a"))
+        .dispatch(&DispatchContext::new(DispatchId::new("a"), OperatorId::new("a")), simple_input("msg-a"))
         .await
         .expect("dispatch a should succeed")
         .collect()
         .await
         .expect("collect a should succeed");
     let result_b = orch
-        .dispatch(&OperatorId::new("b"), simple_input("msg-b"))
+        .dispatch(&DispatchContext::new(DispatchId::new("b"), OperatorId::new("b")), simple_input("msg-b"))
         .await
         .expect("dispatch b should succeed")
         .collect()
@@ -174,10 +174,10 @@ async fn dispatch_many_partial_failure() {
     // "bad" is intentionally not registered.
 
     let ok_output = orch
-        .dispatch(&OperatorId::new("ok"), simple_input("fine"))
+        .dispatch(&DispatchContext::new(DispatchId::new("ok"), OperatorId::new("ok")), simple_input("fine"))
         .await;
     let bad_result = orch
-        .dispatch(&OperatorId::new("bad"), simple_input("boom"))
+        .dispatch(&DispatchContext::new(DispatchId::new("bad"), OperatorId::new("bad")), simple_input("boom"))
         .await;
 
     assert!(ok_output.is_ok(), "known agent should succeed");
@@ -209,7 +209,7 @@ async fn dispatch_propagates_operator_failure() {
     orch.register(OperatorId::new("fail"), Arc::new(AlwaysFailOperator));
 
     let result = orch
-        .dispatch(&OperatorId::new("fail"), simple_input("trigger"))
+        .dispatch(&DispatchContext::new(DispatchId::new("fail"), OperatorId::new("fail")), simple_input("trigger"))
         .await;
     let err = match result {
         Err(e) => e,

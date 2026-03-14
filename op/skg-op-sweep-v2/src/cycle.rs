@@ -36,6 +36,7 @@ use layer0::operator::TriggerType;
 use layer0::dispatch::Dispatcher;
 use layer0::{
     OperatorId, Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, DispatchContext};
+use layer0::id::DispatchId;
 use layer0::dispatch::EffectEmitter;
 use skg_orch_compose::{
     dispatch_typed, BudgetDecision, BudgetPolicy, BudgetTracker, CompositionTrace, DispatchError,
@@ -249,9 +250,10 @@ pub async fn run_sweep_cycle<B: BudgetPolicy>(
             query: String::new(),
             query_angle: String::new(),
         };
+        let compare_ctx = DispatchContext::new(DispatchId::new(compare_operator.as_str()), compare_operator.clone());
         let dispatch_result = dispatch_typed::<CompareInput, SweepVerdict>(
             orch,
-            compare_operator,
+            &compare_ctx,
             compare_in,
             TriggerType::Task,
         )
@@ -296,9 +298,10 @@ pub async fn run_sweep_cycle<B: BudgetPolicy>(
         let synthesis_in = SynthesisInput {
             verdicts: report.verdicts.clone(),
         };
+        let synthesis_ctx = DispatchContext::new(DispatchId::new(synthesis_operator.as_str()), synthesis_operator.clone());
         match dispatch_typed::<SynthesisInput, SynthesisReport>(
             orch,
-            synthesis_operator,
+            &synthesis_ctx,
             synthesis_in,
             TriggerType::Task,
         )
@@ -435,7 +438,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use layer0::dispatch::{DispatchEvent, DispatchHandle};
-    use layer0::DispatchId;
+    use layer0::{DispatchContext, DispatchId};
 
     use layer0::dispatch::Dispatcher;
     use async_trait::async_trait;
@@ -545,10 +548,10 @@ mod tests {
     impl Dispatcher for MockDispatcher {
         async fn dispatch(
             &self,
-            operator: &OperatorId,
+            ctx: &DispatchContext,
             _input: OperatorInput,
         ) -> Result<DispatchHandle, OrchError> {
-            let json = if *operator == self.synthesis_operator {
+            let json = if ctx.operator_id == self.synthesis_operator {
                 self.synthesis_dispatched.store(true, Ordering::SeqCst);
                 self.synthesis_response.clone()
             } else {

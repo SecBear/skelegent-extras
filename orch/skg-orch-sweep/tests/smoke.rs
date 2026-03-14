@@ -21,6 +21,8 @@ use skg_op_sweep::{
     SweepVerdict, VerdictStatus, CompareInput,
 };
 use skg_orch_compose::{dispatch_typed, ScopedStateView};
+use layer0::DispatchContext;
+use layer0::id::DispatchId;
 use skg_orch_sweep::{
     BudgetConfig, BudgetState, CycleReport, OrchestratorConfig, QueuedDecision, run_cycle,
 };
@@ -228,8 +230,9 @@ async fn smoke_full_cycle_with_three_decisions() {
                     query: None,
                     query_angle: None,
                 };
+                let ctx = DispatchContext::new(DispatchId::new(compare_id.as_str()), compare_id.clone());
                 let (verdict, _) = dispatch_typed::<CompareInput, SweepVerdict>(
-                    &orch, &compare_id, input, TriggerType::Task,
+                    &orch, &ctx, input, TriggerType::Task,
                 ).await.unwrap_or_else(|e| panic!("operator failed for {id}: {e}"));
                 verdict
             })
@@ -329,8 +332,9 @@ async fn smoke_budget_exhaustion_stops_cycle() {
                     query: None,
                     query_angle: None,
                 };
+                let ctx = DispatchContext::new(DispatchId::new(compare_id.as_str()), compare_id.clone());
                 let (verdict, _) = dispatch_typed::<CompareInput, SweepVerdict>(
-                    &orch, &compare_id, input, TriggerType::Task,
+                    &orch, &ctx, input, TriggerType::Task,
                 ).await.unwrap_or_else(|e| panic!("operator failed: {e}"));
                 verdict
             })

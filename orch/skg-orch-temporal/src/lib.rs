@@ -56,7 +56,7 @@ use client::{MockTemporalClient, TemporalClient, TemporalError};
 use layer0::dispatch::{DispatchEvent, DispatchHandle, Dispatcher};
 use layer0::effect::SignalPayload;
 use layer0::error::OrchError;
-use layer0::id::{DispatchId, OperatorId, WorkflowId};
+use layer0::id::{OperatorId, WorkflowId};
 use layer0::operator::{Operator, OperatorInput};
 use serde_json::{json, Value};
 use skg_effects_core::{QueryPayload, Queryable, Signalable};
@@ -612,15 +612,15 @@ fn client_new_error_message(error: ClientNewError) -> String {
 impl Dispatcher for TemporalOrch {
     async fn dispatch(
         &self,
-        operator: &OperatorId,
+        ctx: &layer0::DispatchContext,
         input: OperatorInput,
     ) -> Result<DispatchHandle, OrchError> {
         let bytes = serde_json::to_vec(&input)
             .map_err(|e| OrchError::DispatchFailed(format!("serialization: {e}")))?;
 
         let client = Arc::clone(&self.client);
-        let op_str = operator.as_str().to_owned();
-        let (handle, sender) = DispatchHandle::channel(DispatchId::new("temporal"));
+        let op_str = ctx.operator_id.as_str().to_owned();
+        let (handle, sender) = DispatchHandle::channel(ctx.dispatch_id.clone());
 
         tokio::spawn(async move {
             let result = client

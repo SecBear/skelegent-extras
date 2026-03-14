@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use layer0::dispatch::Dispatcher;
 use layer0::{
-    operator::TriggerType, OperatorId, Content, OperatorInput, OperatorOutput, OrchError,
+    DispatchContext, operator::TriggerType, Content, OperatorInput, OperatorOutput, OrchError,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
@@ -45,7 +45,7 @@ pub enum DispatchError {
 /// into `O`, or [`DispatchError::Dispatch`] if the underlying dispatch fails.
 pub async fn dispatch_typed<I, O>(
     dispatcher: &dyn Dispatcher,
-    operator: &OperatorId,
+    ctx: &DispatchContext,
     input: I,
     trigger: TriggerType,
 ) -> Result<(O, OperatorOutput), DispatchError>
@@ -62,7 +62,7 @@ where
     let mut op_input = OperatorInput::new(Content::text(json_text), trigger);
     op_input.metadata = metadata;
 
-    let output = dispatcher.dispatch(operator, op_input).await?.collect().await?;
+    let output = dispatcher.dispatch(ctx, op_input).await?.collect().await?;
 
     let text = output
         .message
@@ -85,13 +85,13 @@ where
 /// This is the standalone replacement for the removed `Orchestrator::dispatch_many()` method.
 pub async fn dispatch_many(
     dispatcher: Arc<dyn Dispatcher>,
-    tasks: Vec<(OperatorId, OperatorInput)>,
+    tasks: Vec<(DispatchContext, OperatorInput)>,
 ) -> Vec<Result<OperatorOutput, OrchError>> {
     let mut handles: Vec<tokio::task::JoinHandle<Result<OperatorOutput, OrchError>>> = Vec::with_capacity(tasks.len());
-    for (operator_id, input) in tasks {
+    for (ctx, input) in tasks {
         let d = Arc::clone(&dispatcher);
         handles.push(tokio::spawn(async move {
-            d.dispatch(&operator_id, input).await?.collect().await
+            d.dispatch(&ctx, input).await?.collect().await
         }));
     }
     let mut results = Vec::with_capacity(handles.len());
@@ -109,7 +109,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use layer0::{
-        ExitReason, OrchError, dispatch::{Dispatcher, DispatchEvent, DispatchHandle},
+        ExitReason, OperatorId, OrchError, dispatch::{Dispatcher, DispatchEvent, DispatchHandle},
     };
     use layer0::id::DispatchId;
     use serde::{Deserialize, Serialize};
@@ -132,7 +132,7 @@ mod tests {
     impl Dispatcher for EchoDispatcher {
         async fn dispatch(
             &self,
-            _operator: &OperatorId,
+            _ctx: &DispatchContext,
             input: OperatorInput,
         ) -> Result<DispatchHandle, OrchError> {
             let output = {
@@ -157,7 +157,7 @@ mod tests {
     impl Dispatcher for FixedDispatcher {
         async fn dispatch(
             &self,
-            _operator: &OperatorId,
+            _ctx: &DispatchContext,
             _input: OperatorInput,
         ) -> Result<DispatchHandle, OrchError> {
             let output = {
@@ -176,7 +176,7 @@ mod tests {
     #[tokio::test]
     async fn typed_roundtrip_with_echo() {
         let orch = Arc::new(EchoDispatcher);
-        let operator = OperatorId::new("test-agent");
+        let ctx = DispatchContext::new(DispatchId::new("test-agent"), OperatorId::new("test-agent"));
         let input = TestInput {
             question: "what is 2+2?".into(),
         };
@@ -184,7 +184,7 @@ mod tests {
         // Echo returns the serialized input as output, so we deserialize it
         // back into TestInput (not TestOutput).
         let (output, raw): (TestInput, _) =
-            dispatch_typed(&*orch, &operator, input.clone(), TriggerType::Task)
+            dispatch_typed(&*orch, &ctx, input.clone(), TriggerType::Task)
                 .await
                 .unwrap();
 
@@ -197,11 +197,11 @@ mod tests {
         let orch = Arc::new(FixedDispatcher {
             response: r#"{"answer":"four"}"#.into(),
         });
-        let operator = OperatorId::new("test-agent");
+        let ctx = DispatchContext::new(DispatchId::new("test-agent"), OperatorId::new("test-agent"));
 
         let (output, _): (TestOutput, _) = dispatch_typed(
             &*orch,
-            &operator,
+            &ctx,
             TestInput {
                 question: "what is 2+2?".into(),
             },
@@ -223,11 +223,11 @@ mod tests {
         let orch = Arc::new(FixedDispatcher {
             response: "not valid json for TestOutput".into(),
         });
-        let operator = OperatorId::new("test-agent");
+        let ctx = DispatchContext::new(DispatchId::new("test-agent"), OperatorId::new("test-agent"));
 
         let result: Result<(TestOutput, _), _> = dispatch_typed(
             &*orch,
-            &operator,
+            &ctx,
             TestInput {
                 question: "hello".into(),
             },
@@ -242,13 +242,13 @@ mod tests {
     async fn metadata_carries_structured_input() {
         // Verify that the metadata field carries the full structured input
         let orch = Arc::new(EchoDispatcher);
-        let operator = OperatorId::new("test-agent");
+        let ctx = DispatchContext::new(DispatchId::new("test-agent"), OperatorId::new("test-agent"));
         let input = TestInput {
             question: "test".into(),
         };
 
         let (_, raw) =
-            dispatch_typed::<_, TestInput>(&*orch, &operator, input, TriggerType::Task)
+            dispatch_typed::<_, TestInput>(&*orch, &ctx, input, TriggerType::Task)
                 .await
                 .unwrap();
 

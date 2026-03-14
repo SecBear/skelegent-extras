@@ -17,6 +17,9 @@ use skg_a2a_core::{
     A2aError, A2aTask, JsonRpcErrorResponse, JsonRpcRequest, JsonRpcResponse, TaskState,
 };
 
+use layer0::DispatchContext;
+use layer0::id::DispatchId;
+
 use super::stream::{stream_dispatch, stream_subscription};
 use super::A2aServerState;
 
@@ -119,7 +122,11 @@ async fn handle_send_message(
     };
 
     let input = a2a_message_to_operator_input(&send_req.message);
-    let output = match state.dispatcher.dispatch(&state.default_operator, input).await {
+    let ctx = DispatchContext::new(
+        DispatchId::new(state.default_operator.as_str()),
+        state.default_operator.clone(),
+    );
+    let output = match state.dispatcher.dispatch(&ctx, input).await {
         Ok(handle) => match handle.collect().await {
             Ok(o) => o,
             Err(e) => {
@@ -157,7 +164,11 @@ async fn handle_stream_message(
     };
 
     let input = a2a_message_to_operator_input(&send_req.message);
-    let handle = match state.dispatcher.dispatch(&state.default_operator, input).await {
+    let ctx = DispatchContext::new(
+        DispatchId::new(state.default_operator.as_str()),
+        state.default_operator.clone(),
+    );
+    let handle = match state.dispatcher.dispatch(&ctx, input).await {
         Ok(h) => h,
         Err(e) => {
             return jsonrpc_error_response(

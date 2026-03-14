@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use layer0::{
-    OperatorId, OperatorInput, OrchError,
+    DispatchContext, OperatorId, OperatorInput, OrchError,
     dispatch::{Dispatcher, DispatchHandle},
 };
 use std::collections::HashMap;
@@ -66,10 +66,10 @@ impl RoutingDispatcher {
 impl Dispatcher for RoutingDispatcher {
     async fn dispatch(
         &self,
-        operator: &OperatorId,
+        ctx: &DispatchContext,
         input: OperatorInput,
     ) -> Result<DispatchHandle, OrchError> {
-        self.resolve(operator).dispatch(operator, input).await
+        self.resolve(&ctx.operator_id).dispatch(ctx, input).await
     }
 }
 
@@ -96,10 +96,10 @@ mod tests {
     impl Dispatcher for RecordingDispatcher {
         async fn dispatch(
             &self,
-            operator: &OperatorId,
+            ctx: &DispatchContext,
             _input: OperatorInput,
         ) -> Result<DispatchHandle, OrchError> {
-            self.dispatched.lock().unwrap().push(operator.as_str().to_owned());
+            self.dispatched.lock().unwrap().push(ctx.operator_id.as_str().to_owned());
             let output = OperatorOutput::new(Content::text("ok"), ExitReason::Complete);
             let (handle, sender) = DispatchHandle::channel(DispatchId::new("test"));
             tokio::spawn(async move {
@@ -121,8 +121,8 @@ mod tests {
         let router = RoutingDispatcher::new(Arc::new(mock_b))
             .route("alpha", Arc::new(mock_a));
 
-        router.dispatch(&OperatorId::new("alpha"), make_input()).await.unwrap().collect().await.unwrap();
-        router.dispatch(&OperatorId::new("beta"), make_input()).await.unwrap().collect().await.unwrap();
+        router.dispatch(&DispatchContext::new(layer0::id::DispatchId::new("alpha"), OperatorId::new("alpha")), make_input()).await.unwrap().collect().await.unwrap();
+        router.dispatch(&DispatchContext::new(layer0::id::DispatchId::new("beta"), OperatorId::new("beta")), make_input()).await.unwrap().collect().await.unwrap();
 
         assert_eq!(*log_a.lock().unwrap(), vec!["alpha"]);
         assert_eq!(*log_b.lock().unwrap(), vec!["beta"]);
@@ -136,7 +136,7 @@ mod tests {
         let router = RoutingDispatcher::new(Arc::new(mock_b))
             .route("alpha", Arc::new(mock_a));
 
-        router.dispatch(&OperatorId::new("gamma"), make_input()).await.unwrap().collect().await.unwrap();
+        router.dispatch(&DispatchContext::new(layer0::id::DispatchId::new("gamma"), OperatorId::new("gamma")), make_input()).await.unwrap().collect().await.unwrap();
 
         assert!(log_a.lock().unwrap().is_empty(), "route for alpha must not fire");
         assert_eq!(*log_b.lock().unwrap(), vec!["gamma"]);
