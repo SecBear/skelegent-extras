@@ -1,0 +1,19 @@
+[package]
+name = "skg-hook-otel"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "OpenTelemetry dispatch middleware for skelegent"
+publish = false
+
+[dependencies]
+layer0 = { path = "../../../skelegent/layer0" }
+async-trait = "0.1"
+opentelemetry = { version = "0.31", features = ["trace"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -10,12 +10,14 @@ members = [
   "state/skg-state-sqlite",
   "state/skg-state-cozo",
   "effects/skg-effects-git",
+  "effects/skg-effects-temporal",
   "auth/skg-auth-oauth",
   "auth/skg-auth-pi",
   "auth/skg-auth-omp",
   "client/skg-client-parallel",
   "run/skg-run-sqlite",
   "a2a/skg-a2a",
+  "hooks/skg-hook-otel",
 ]
 
 [workspace.package]

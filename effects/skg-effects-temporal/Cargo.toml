@@ -1,0 +1,23 @@
+[package]
+name = "skg-effects-temporal"
+version = "0.1.0"
+edition.workspace = true
+rust-version = "1.85"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Temporal-backed effect executor for skelegent"
+publish = false
+
+[dependencies]
+layer0 = { path = "../../../skelegent/layer0" }
+skg-effects-core = { path = "../../../skelegent/effects/skg-effects-core" }
+skg-orch-temporal = { path = "../../orch/skg-orch-temporal" }
+async-trait = "0.1"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+layer0 = { path = "../../../skelegent/layer0", features = ["test-utils"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
