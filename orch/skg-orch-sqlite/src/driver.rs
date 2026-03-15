@@ -251,7 +251,6 @@ fn effect_kind(effect: &Effect) -> &'static str {
         Effect::Signal { .. } => "signal",
         Effect::Delegate { .. } => "delegate",
         Effect::Handoff { .. } => "handoff",
-        Effect::Log { .. } => "log",
         Effect::LinkMemory { .. } => "link_memory",
         Effect::UnlinkMemory { .. } => "unlink_memory",
         Effect::ToolApprovalRequired { .. } => "tool_approval_required",

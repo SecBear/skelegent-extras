@@ -102,8 +102,8 @@ impl EffectHandler for TemporalEffectHandler {
                 ))),
             },
 
-            // ── Non-executing effects: policy-based ──
-            Effect::Log { .. } | Effect::Custom { .. } => match self.unknown_policy {
+            // ── Custom effects: policy-based ──
+            Effect::Custom { .. } => match self.unknown_policy {
                 UnknownEffectPolicy::IgnoreAndWarn => {
                     tracing::warn!("ignoring unsupported effect: {:?}", effect);
                     Ok(EffectOutcome::Skipped)

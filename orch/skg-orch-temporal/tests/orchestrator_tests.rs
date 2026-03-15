@@ -434,7 +434,7 @@ fn temporal_sdk_config_can_describe_generic_durable_run_workflow() {
 // ── Effect streaming tests ───────────────────────────────────────────────────
 
 use layer0::dispatch::DispatchEvent;
-use layer0::effect::{Effect, LogLevel};
+use layer0::effect::Effect;
 
 /// Operator that sets effects directly on its output.
 struct EffectfulOperator;
@@ -449,15 +449,13 @@ impl Operator for EffectfulOperator {
     ) -> Result<OperatorOutput, OperatorError> {
         let mut output = OperatorOutput::new(Content::text("done"), ExitReason::Complete);
         output.effects = vec![
-            Effect::Log {
-                level: LogLevel::Info,
-                message: "step-1".into(),
-                data: None,
+            Effect::Custom {
+                effect_type: "test_step".into(),
+                data: serde_json::json!({"step": "step-1", "level": "info"}),
             },
-            Effect::Log {
-                level: LogLevel::Debug,
-                message: "step-2".into(),
-                data: None,
+            Effect::Custom {
+                effect_type: "test_step".into(),
+                data: serde_json::json!({"step": "step-2", "level": "debug"}),
             },
         ];
         Ok(output)
@@ -504,11 +502,11 @@ async fn dispatch_streams_effects_before_completed() {
     assert_eq!(effects_received.len(), 2);
     assert!(matches!(
         &effects_received[0],
-        Effect::Log { message, level: LogLevel::Info, .. } if message == "step-1"
+        Effect::Custom { effect_type, .. } if effect_type == "test_step"
     ));
     assert!(matches!(
         &effects_received[1],
-        Effect::Log { message, level: LogLevel::Debug, .. } if message == "step-2"
+        Effect::Custom { effect_type, .. } if effect_type == "test_step"
     ));
 
     // Completed output should also exist.
@@ -535,10 +533,10 @@ async fn dispatch_collect_includes_streamed_effects() {
     assert_eq!(output.effects.len(), 2);
     assert!(matches!(
         &output.effects[0],
-        Effect::Log { message, level: LogLevel::Info, .. } if message == "step-1"
+        Effect::Custom { effect_type, .. } if effect_type == "test_step"
     ));
     assert!(matches!(
         &output.effects[1],
-        Effect::Log { message, level: LogLevel::Debug, .. } if message == "step-2"
+        Effect::Custom { effect_type, .. } if effect_type == "test_step"
     ));
 }
