@@ -1,55 +1,48 @@
 #![deny(missing_docs)]
-//! Temporal-backed effect executor for skelegent.
+//! Temporal-backed effect handler for skelegent.
 //!
-//! Unlike [`skg_effects_local::LocalEffectExecutor`] which executes effects
-//! in-process, this executor routes delegation and signalling through a
-//! Temporal-backed [`Dispatcher`] / [`Signalable`], making those effects
-//! durable and retriable.
+//! Unlike [`skg_effects_local::LocalEffectHandler`] which executes effects
+//! in-process, this handler routes delegation and signalling through a
+//! Temporal-backed [`Signalable`], making signal effects durable and retriable.
+//! Delegate and Handoff effects are returned as [`EffectOutcome`] variants for
+//! the caller to dispatch.
 //!
 //! State effects (`WriteMemory`, `DeleteMemory`, `LinkMemory`, `UnlinkMemory`)
 //! are **not** handled — they require a state-store activity worker that is
-//! outside the scope of this crate. A warning is logged and execution
-//! continues.
+//! outside the scope of this crate. A warning is logged and
+//! [`EffectOutcome::Skipped`] is returned.
 
 use async_trait::async_trait;
 use layer0::content::Content;
-use layer0::dispatch::Dispatcher;
 use layer0::effect::Effect;
 use layer0::error::OrchError;
-use layer0::id::DispatchId;
 use layer0::operator::{OperatorInput, TriggerType};
 use layer0::DispatchContext;
-use serde_json::json;
-use skg_effects_core::{EffectExecutor, Error, Signalable, UnknownEffectPolicy};
+use serde_json::Value;
+use skg_effects_core::{EffectHandler, EffectOutcome, Error, Signalable, UnknownEffectPolicy};
 use std::sync::Arc;
 
-/// Temporal-backed effect executor.
+/// Temporal-backed effect handler.
 ///
-/// Routes `Delegate` and `Handoff` effects through a [`Dispatcher`] (typically
-/// a [`TemporalOrch`](skg_orch_temporal::TemporalOrch)), which schedules them
-/// as durable Temporal activities. `Signal` effects go through a [`Signalable`]
+/// `Delegate` and `Handoff` effects are returned as [`EffectOutcome`] variants
+/// so the caller (e.g. an orchestrated runner) can schedule them as durable
+/// Temporal activities. `Signal` effects go through a [`Signalable`]
 /// implementation.
 ///
 /// State-mutation effects (`WriteMemory`, `DeleteMemory`, `LinkMemory`,
-/// `UnlinkMemory`) log a warning and are skipped — they require a dedicated
-/// state-store activity worker that is not yet implemented.
-pub struct TemporalEffectExecutor {
-    /// Dispatcher for delegation and handoff effects (typically a `TemporalOrch`).
-    pub dispatcher: Arc<dyn Dispatcher>,
+/// `UnlinkMemory`) log a warning and return [`EffectOutcome::Skipped`] — they
+/// require a dedicated state-store activity worker that is not yet implemented.
+pub struct TemporalEffectHandler {
     /// Signaler for signal effects. When `None`, signal effects error.
     pub signaler: Option<Arc<dyn Signalable>>,
-    /// Policy for effects this executor does not handle.
+    /// Policy for effects this handler does not handle.
     pub unknown_policy: UnknownEffectPolicy,
 }
 
-impl TemporalEffectExecutor {
-    /// Create a new executor with the default `IgnoreAndWarn` unknown-effect policy.
-    pub fn new(
-        dispatcher: Arc<dyn Dispatcher>,
-        signaler: Option<Arc<dyn Signalable>>,
-    ) -> Self {
+impl TemporalEffectHandler {
+    /// Create a new handler with the default `IgnoreAndWarn` unknown-effect policy.
+    pub fn new(signaler: Option<Arc<dyn Signalable>>) -> Self {
         Self {
-            dispatcher,
             signaler,
             unknown_policy: UnknownEffectPolicy::IgnoreAndWarn,
         }
@@ -63,76 +56,73 @@ impl TemporalEffectExecutor {
 }
 
 #[async_trait]
-impl EffectExecutor for TemporalEffectExecutor {
-    async fn execute(&self, effects: &[Effect], ctx: &DispatchContext) -> Result<(), Error> {
-        for effect in effects {
-            match effect {
-                // ── State effects: not supported without an activity worker ──
-                Effect::WriteMemory { .. }
-                | Effect::DeleteMemory { .. }
-                | Effect::LinkMemory { .. }
-                | Effect::UnlinkMemory { .. } => {
-                    tracing::warn!(
-                        "temporal executor: skipping state effect (requires state-store activity worker): {:?}",
-                        std::mem::discriminant(effect),
-                    );
-                }
-
-                // ── Dispatch effects: routed through Temporal dispatcher ──
-                Effect::Delegate { operator, input } => {
-                    let child_ctx =
-                        ctx.child(DispatchId::new(operator.as_str()), operator.clone());
-                    self.dispatcher
-                        .dispatch(&child_ctx, (*input.clone()).clone())
-                        .await?
-                        .collect()
-                        .await?;
-                }
-
-                Effect::Handoff { operator, state } => {
-                    let mut input =
-                        OperatorInput::new(Content::text(state.to_string()), TriggerType::Task);
-                    input.metadata = json!({ "handoff": true });
-                    let child_ctx =
-                        ctx.child(DispatchId::new(operator.as_str()), operator.clone());
-                    self.dispatcher
-                        .dispatch(&child_ctx, input)
-                        .await?
-                        .collect()
-                        .await?;
-                }
-
-                // ── Signals: routed through Signalable ──
-                Effect::Signal { target, payload } => match &self.signaler {
-                    Some(s) => s.signal(target, payload.clone()).await?,
-                    None => {
-                        return Err(Error::Dispatch(OrchError::DispatchFailed(
-                            "signal requires a Signalable implementation".into(),
-                        )));
-                    }
-                },
-
-                // ── Non-executing effects: policy-based ──
-                Effect::Log { .. } | Effect::Custom { .. } => match self.unknown_policy {
-                    UnknownEffectPolicy::IgnoreAndWarn => {
-                        tracing::warn!("ignoring unsupported effect: {:?}", effect);
-                    }
-                    UnknownEffectPolicy::Error => return Err(Error::UnknownEffect),
-                },
-
-                // Forward-compat: Effect is #[non_exhaustive].
-                _ => match self.unknown_policy {
-                    UnknownEffectPolicy::IgnoreAndWarn => {
-                        tracing::warn!(
-                            "ignoring forward-compatible effect variant: {:?}",
-                            effect
-                        );
-                    }
-                    UnknownEffectPolicy::Error => return Err(Error::UnknownEffect),
-                },
+impl EffectHandler for TemporalEffectHandler {
+    async fn handle(
+        &self,
+        effect: &Effect,
+        _ctx: &DispatchContext,
+    ) -> Result<EffectOutcome, Error> {
+        match effect {
+            // ── State effects: not supported without an activity worker ──
+            Effect::WriteMemory { .. }
+            | Effect::DeleteMemory { .. }
+            | Effect::LinkMemory { .. }
+            | Effect::UnlinkMemory { .. } => {
+                tracing::warn!(
+                    "temporal handler: skipping state effect (requires state-store activity worker): {:?}",
+                    std::mem::discriminant(effect),
+                );
+                Ok(EffectOutcome::Skipped)
             }
+
+            // ── Dispatch effects: returned as outcomes for caller to schedule ──
+            Effect::Delegate { operator, input } => Ok(EffectOutcome::Delegate {
+                operator: operator.clone(),
+                input: (*input.clone()).clone(),
+            }),
+
+            Effect::Handoff { operator, state } => {
+                let mut input =
+                    OperatorInput::new(Content::text(state.to_string()), TriggerType::Task);
+                input.metadata = Value::Null;
+                Ok(EffectOutcome::Handoff {
+                    operator: operator.clone(),
+                    input,
+                })
+            }
+
+            // ── Signals: routed through Signalable ──
+            Effect::Signal { target, payload } => match &self.signaler {
+                Some(s) => {
+                    s.signal(target, payload.clone()).await?;
+                    Ok(EffectOutcome::Applied)
+                }
+                None => Err(Error::Dispatch(OrchError::DispatchFailed(
+                    "signal requires a Signalable implementation".into(),
+                ))),
+            },
+
+            // ── Non-executing effects: policy-based ──
+            Effect::Log { .. } | Effect::Custom { .. } => match self.unknown_policy {
+                UnknownEffectPolicy::IgnoreAndWarn => {
+                    tracing::warn!("ignoring unsupported effect: {:?}", effect);
+                    Ok(EffectOutcome::Skipped)
+                }
+                UnknownEffectPolicy::Error => Err(Error::UnknownEffect),
+            },
+
+            // Forward-compat: Effect is #[non_exhaustive].
+            _ => match self.unknown_policy {
+                UnknownEffectPolicy::IgnoreAndWarn => {
+                    tracing::warn!(
+                        "ignoring forward-compatible effect variant: {:?}",
+                        effect
+                    );
+                    Ok(EffectOutcome::Skipped)
+                }
+                UnknownEffectPolicy::Error => Err(Error::UnknownEffect),
+            },
         }
-        Ok(())
     }
 }
 
@@ -143,94 +133,79 @@ mod tests {
     use layer0::effect::{Effect, SignalPayload};
     use layer0::id::{DispatchId, OperatorId, WorkflowId};
     use layer0::operator::{OperatorInput, TriggerType};
-    use layer0::test_utils::EchoOperator;
     use skg_effects_core::UnknownEffectPolicy;
     use skg_orch_temporal::{TemporalConfig, TemporalOrch};
     use std::sync::Arc;
 
-    /// Build a TemporalOrch with a registered echo operator and return it as
-    /// both `Arc<dyn Dispatcher>` and `Arc<dyn Signalable>`.
+    /// Build a TemporalOrch (for its Signalable impl) and a DispatchContext.
     fn make_orch() -> (Arc<TemporalOrch>, DispatchContext) {
-        let mut orch = TemporalOrch::new(TemporalConfig::default());
-        orch.register(OperatorId::new("echo"), Arc::new(EchoOperator));
+        let orch = TemporalOrch::new(TemporalConfig::default());
         let ctx = DispatchContext::new(DispatchId::new("test"), OperatorId::new("test"));
         (Arc::new(orch), ctx)
     }
 
     #[tokio::test]
-    async fn delegate_dispatches_through_temporal() {
+    async fn delegate_returns_delegate_outcome() {
         let (orch, ctx) = make_orch();
-        let executor = TemporalEffectExecutor::new(
-            Arc::clone(&orch) as Arc<dyn Dispatcher>,
-            Some(Arc::clone(&orch) as Arc<dyn Signalable>),
-        );
+        let handler = TemporalEffectHandler::new(Some(Arc::clone(&orch) as Arc<dyn Signalable>));
 
-        let effects = vec![Effect::Delegate {
+        let effect = Effect::Delegate {
             operator: OperatorId::new("echo"),
             input: Box::new(OperatorInput::new(Content::text("hello"), TriggerType::Task)),
-        }];
+        };
 
-        executor.execute(&effects, &ctx).await.unwrap();
+        let outcome = handler.handle(&effect, &ctx).await.unwrap();
+        assert!(matches!(outcome, EffectOutcome::Delegate { .. }));
     }
 
     #[tokio::test]
-    async fn handoff_dispatches_through_temporal() {
+    async fn handoff_returns_handoff_outcome() {
         let (orch, ctx) = make_orch();
-        let executor = TemporalEffectExecutor::new(
-            Arc::clone(&orch) as Arc<dyn Dispatcher>,
-            Some(Arc::clone(&orch) as Arc<dyn Signalable>),
-        );
+        let handler = TemporalEffectHandler::new(Some(Arc::clone(&orch) as Arc<dyn Signalable>));
 
-        let effects = vec![Effect::Handoff {
+        let effect = Effect::Handoff {
             operator: OperatorId::new("echo"),
             state: serde_json::json!({ "key": "value" }),
-        }];
+        };
 
-        executor.execute(&effects, &ctx).await.unwrap();
+        let outcome = handler.handle(&effect, &ctx).await.unwrap();
+        assert!(matches!(outcome, EffectOutcome::Handoff { .. }));
     }
 
     #[tokio::test]
     async fn signal_goes_through_signalable() {
         let (orch, ctx) = make_orch();
-        let executor = TemporalEffectExecutor::new(
-            Arc::clone(&orch) as Arc<dyn Dispatcher>,
-            Some(Arc::clone(&orch) as Arc<dyn Signalable>),
-        );
+        let handler = TemporalEffectHandler::new(Some(Arc::clone(&orch) as Arc<dyn Signalable>));
 
-        let effects = vec![Effect::Signal {
+        let effect = Effect::Signal {
             target: WorkflowId::new("wf-1"),
             payload: SignalPayload::new("test-signal", serde_json::json!({})),
-        }];
+        };
 
-        executor.execute(&effects, &ctx).await.unwrap();
+        let outcome = handler.handle(&effect, &ctx).await.unwrap();
+        assert!(matches!(outcome, EffectOutcome::Applied));
     }
 
     #[tokio::test]
     async fn signal_without_signaler_errors() {
-        let (orch, ctx) = make_orch();
-        let executor = TemporalEffectExecutor::new(
-            Arc::clone(&orch) as Arc<dyn Dispatcher>,
-            None,
-        );
+        let (_orch, ctx) = make_orch();
+        let handler = TemporalEffectHandler::new(None);
 
-        let effects = vec![Effect::Signal {
+        let effect = Effect::Signal {
             target: WorkflowId::new("wf-1"),
             payload: SignalPayload::new("test", serde_json::json!({})),
-        }];
+        };
 
-        let result = executor.execute(&effects, &ctx).await;
+        let result = handler.handle(&effect, &ctx).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn state_effects_are_skipped() {
-        let (orch, ctx) = make_orch();
-        let executor = TemporalEffectExecutor::new(
-            Arc::clone(&orch) as Arc<dyn Dispatcher>,
-            None,
-        );
+        let (_orch, ctx) = make_orch();
+        let handler = TemporalEffectHandler::new(None);
 
-        let effects = vec![Effect::WriteMemory {
+        let effect = Effect::WriteMemory {
             scope: layer0::effect::Scope::Global,
             key: "k".into(),
             value: serde_json::json!("v"),
@@ -239,44 +214,39 @@ mod tests {
             content_kind: None,
             salience: None,
             ttl: None,
-        }];
+        };
 
-        // Should succeed (warn-and-skip), not error.
-        executor.execute(&effects, &ctx).await.unwrap();
+        let outcome = handler.handle(&effect, &ctx).await.unwrap();
+        assert!(matches!(outcome, EffectOutcome::Skipped));
     }
 
     #[tokio::test]
     async fn unknown_policy_error_rejects_custom() {
-        let (orch, ctx) = make_orch();
-        let executor = TemporalEffectExecutor::new(
-            Arc::clone(&orch) as Arc<dyn Dispatcher>,
-            None,
-        )
-        .with_unknown_policy(UnknownEffectPolicy::Error);
+        let (_orch, ctx) = make_orch();
+        let handler = TemporalEffectHandler::new(None)
+            .with_unknown_policy(UnknownEffectPolicy::Error);
 
-        let effects = vec![Effect::Custom {
+        let effect = Effect::Custom {
             effect_type: "something".into(),
             data: serde_json::json!({}),
-        }];
+        };
 
-        let result = executor.execute(&effects, &ctx).await;
+        let result = handler.handle(&effect, &ctx).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn unknown_policy_ignore_accepts_custom() {
-        let (orch, ctx) = make_orch();
-        let executor = TemporalEffectExecutor::new(
-            Arc::clone(&orch) as Arc<dyn Dispatcher>,
-            None,
-        )
-        .with_unknown_policy(UnknownEffectPolicy::IgnoreAndWarn);
+        let (_orch, ctx) = make_orch();
+        let handler = TemporalEffectHandler::new(None)
+            .with_unknown_policy(UnknownEffectPolicy::IgnoreAndWarn);
 
-        let effects = vec![Effect::Custom {
+        let effect = Effect::Custom {
             effect_type: "something".into(),
             data: serde_json::json!({}),
-        }];
+        };
 
-        executor.execute(&effects, &ctx).await.unwrap();
+        let outcome = handler.handle(&effect, &ctx).await.unwrap();
+        assert!(matches!(outcome, EffectOutcome::Skipped));
     }
 }
