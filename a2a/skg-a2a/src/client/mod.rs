@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use layer0::content::Content;
 use layer0::dispatch::{DispatchEvent, DispatchHandle, Dispatcher};
 use layer0::error::OrchError;
-use layer0::id::{DispatchId, OperatorId};
+use layer0::id::DispatchId;
 use layer0::DispatchContext;
 use layer0::operator::{ExitReason, OperatorInput, OperatorOutput};
 use skg_a2a_core::convert::{content_to_parts, parts_to_content};
