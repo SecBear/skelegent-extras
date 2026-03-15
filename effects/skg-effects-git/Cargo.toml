@@ -8,7 +8,7 @@ homepage.workspace = true
 description = "Git/GitHub effect module — translates sweep verdicts into PRs, commits, and digests"
 
 [dependencies]
-skg-op-sweep = { path = "../../op/skg-op-sweep", version = "0.4.0" }
+skg-op-sweep-v2 = { path = "../../op/skg-op-sweep-v2", version = "0.4.0" }
 skg-state-sqlite = { path = "../../state/skg-state-sqlite", version = "0.4.0" }
 async-trait = "0.1"
 chrono = "0.4"

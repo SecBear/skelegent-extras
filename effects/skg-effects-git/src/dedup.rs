@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use skg_op_sweep::SweepVerdict;
+use skg_op_sweep_v2::SweepVerdict;
 use skg_state_sqlite::search::term_jaccard;
 use regex::Regex;
 
@@ -93,7 +93,7 @@ pub fn dedup_check_layers_1_2(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skg_op_sweep::{
+    use skg_op_sweep_v2::{
         EvidenceItem, EvidenceStance, ProcessorTier, SweepVerdict, VerdictStatus,
     };
 
@@ -115,7 +115,6 @@ mod tests {
                     title: String::new(),
                     summary: "test evidence".to_string(),
                     stance: EvidenceStance::Supporting,
-                    retrieved_at: "2026-03-04T11:55:00Z".to_string(),
                 })
                 .collect(),
             narrative: narrative.to_string(),

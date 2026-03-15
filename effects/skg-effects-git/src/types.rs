@@ -1,6 +1,6 @@
 //! Data model for the git/GitHub effects module.
 
-use skg_op_sweep::VerdictStatus;
+use skg_op_sweep_v2::VerdictStatus;
 use serde::{Deserialize, Serialize};
 
 /// Result of the deduplication check for existing PR evidence.

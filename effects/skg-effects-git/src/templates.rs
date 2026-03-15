@@ -1,7 +1,7 @@
 //! Branch naming, PR title, PR body, and digest body templates.
 
 use chrono::Utc;
-use skg_op_sweep::{SweepVerdict, VerdictStatus};
+use skg_op_sweep_v2::{SweepVerdict, VerdictStatus};
 
 use crate::types::DailyDigest;
 
@@ -41,8 +41,8 @@ pub fn pr_body(verdict: &SweepVerdict) -> String {
             .map(|e| {
                 let stance = evidence_stance_str(&e.stance);
                 format!(
-                    "- [{}] [{}]({}) (retrieved {})",
-                    stance, e.summary, e.source_url, e.retrieved_at
+                    "- [{}] [{}]({})",
+                    stance, e.summary, e.source_url
                 )
             })
             .collect::<Vec<_>>()
@@ -192,28 +192,28 @@ fn verdict_status_str(status: &VerdictStatus) -> &'static str {
     }
 }
 
-/// Convert [`skg_op_sweep::EvidenceStance`] to a display string.
-fn evidence_stance_str(stance: &skg_op_sweep::EvidenceStance) -> &'static str {
+/// Convert [`skg_op_sweep_v2::EvidenceStance`] to a display string.
+fn evidence_stance_str(stance: &skg_op_sweep_v2::EvidenceStance) -> &'static str {
     match stance {
-        skg_op_sweep::EvidenceStance::Supporting => "supporting",
-        skg_op_sweep::EvidenceStance::Contradicting => "contradicting",
-        skg_op_sweep::EvidenceStance::Neutral => "neutral",
+        skg_op_sweep_v2::EvidenceStance::Supporting => "supporting",
+        skg_op_sweep_v2::EvidenceStance::Contradicting => "contradicting",
+        skg_op_sweep_v2::EvidenceStance::Neutral => "neutral",
     }
 }
 
-/// Convert [`skg_op_sweep::ProcessorTier`] to a display string.
-fn processor_str(tier: &skg_op_sweep::ProcessorTier) -> &'static str {
+/// Convert [`skg_op_sweep_v2::ProcessorTier`] to a display string.
+fn processor_str(tier: &skg_op_sweep_v2::ProcessorTier) -> &'static str {
     match tier {
-        skg_op_sweep::ProcessorTier::Base => "base",
-        skg_op_sweep::ProcessorTier::Core => "core",
-        skg_op_sweep::ProcessorTier::Ultra => "ultra",
+        skg_op_sweep_v2::ProcessorTier::Base => "base",
+        skg_op_sweep_v2::ProcessorTier::Core => "core",
+        skg_op_sweep_v2::ProcessorTier::Ultra => "ultra",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skg_op_sweep::{EvidenceItem, EvidenceStance, ProcessorTier, VerdictStatus};
+    use skg_op_sweep_v2::{EvidenceItem, EvidenceStance, ProcessorTier, VerdictStatus};
 
     use crate::types::{DailyDigest, DigestEntry, PrAction, PrActivity};
 
@@ -233,7 +233,6 @@ mod tests {
                 title: String::new(),
                 summary: "Confirms the approach".to_string(),
                 stance: EvidenceStance::Supporting,
-                retrieved_at: "2026-03-04T17:55:00Z".to_string(),
             }],
             narrative: "Durable execution patterns remain valid.\nSee supporting evidence."
                 .to_string(),

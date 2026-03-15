@@ -1,9 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-  "op/skg-op-sweep",
   "op/skg-op-sweep-v2",
-  "orch/skg-orch-sweep",
   "orch/skg-orch-compose",
   "orch/skg-orch-temporal",
   "orch/skg-orch-sqlite",

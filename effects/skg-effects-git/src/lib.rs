@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 //! Git/GitHub effect module for the sweep system.
 //!
-//! Translates [`skg_op_sweep::SweepVerdict`] results into git operations:
+//! Translates [`skg_op_sweep_v2::SweepVerdict`] results into git operations:
 //! pull requests, direct commits (for Confirmed verdicts), and daily digest issues.
 //!
 //! # Modules
@@ -38,7 +38,7 @@ pub use types::{
     PrMode,
 };
 
-use skg_op_sweep::VerdictStatus;
+use skg_op_sweep_v2::VerdictStatus;
 
 /// Route a sweep verdict status to the appropriate PR action.
 ///
@@ -64,7 +64,7 @@ pub fn route_verdict(verdict: &VerdictStatus) -> PrAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skg_op_sweep::VerdictStatus;
+    use skg_op_sweep_v2::VerdictStatus;
 
     #[test]
     fn route_confirmed_is_auto_merged() {
