@@ -271,7 +271,7 @@ impl<P: Provider + 'static> Operator for CompareOperator<P> {
         };
 
         let response = self.llm.infer(request).await.map_err(|e| match e {
-            ProviderError::RateLimited => {
+            ProviderError::RateLimited { .. } => {
                 OperatorError::retryable("rate limited by LLM provider")
             }
             ProviderError::TransientError { message, .. } => OperatorError::retryable(message),

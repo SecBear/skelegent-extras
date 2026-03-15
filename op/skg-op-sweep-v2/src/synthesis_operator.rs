@@ -73,7 +73,7 @@ fn extract_json_block(raw: &str) -> &str {
 /// - everything else → `Model`
 fn map_provider_err(e: ProviderError) -> OperatorError {
     match e {
-        ProviderError::RateLimited => {
+        ProviderError::RateLimited { .. } => {
             OperatorError::retryable("rate limited by LLM provider")
         }
         ProviderError::TransientError { message, .. } => OperatorError::retryable(message),
