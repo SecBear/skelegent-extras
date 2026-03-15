@@ -631,13 +631,26 @@ impl Dispatcher for TemporalOrch {
                     other => OrchError::DispatchFailed(other.to_string()),
                 })
                 .and_then(|result_bytes| {
-                    serde_json::from_slice(&result_bytes)
+                    serde_json::from_slice::<layer0::operator::OperatorOutput>(&result_bytes)
                         .map_err(|e| OrchError::DispatchFailed(format!("deserialization: {e}")))
                 });
 
             match result {
-                Ok(output) => { let _ = sender.send(DispatchEvent::Completed { output }).await; }
-                Err(err) => { let _ = sender.send(DispatchEvent::Failed { error: err }).await; }
+                Ok(output) => {
+                    // Re-emit effects from the deserialized output through the event stream.
+                    // Effects survive the Temporal serialization boundary via OperatorOutput,
+                    // but EffectEmitter::noop() during activity execution means they aren't
+                    // streamed as DispatchEvent::EffectEmitted. Bridge that gap here.
+                    for effect in &output.effects {
+                        let _ = sender.send(DispatchEvent::EffectEmitted {
+                            effect: effect.clone(),
+                        }).await;
+                    }
+                    let _ = sender.send(DispatchEvent::Completed { output }).await;
+                }
+                Err(err) => {
+                    let _ = sender.send(DispatchEvent::Failed { error: err }).await;
+                }
             }
         });
 

@@ -429,3 +429,116 @@ fn temporal_sdk_config_can_describe_generic_durable_run_workflow() {
     let cfg = TemporalConfig::default();
     assert!(!cfg.workflow_type.is_empty());
 }
+
+
+// ── Effect streaming tests ───────────────────────────────────────────────────
+
+use layer0::dispatch::DispatchEvent;
+use layer0::effect::{Effect, LogLevel};
+
+/// Operator that sets effects directly on its output.
+struct EffectfulOperator;
+
+#[async_trait::async_trait]
+impl Operator for EffectfulOperator {
+    async fn execute(
+        &self,
+        _input: OperatorInput,
+        _ctx: &DispatchContext,
+        _emitter: &EffectEmitter,
+    ) -> Result<OperatorOutput, OperatorError> {
+        let mut output = OperatorOutput::new(Content::text("done"), ExitReason::Complete);
+        output.effects = vec![
+            Effect::Log {
+                level: LogLevel::Info,
+                message: "step-1".into(),
+                data: None,
+            },
+            Effect::Log {
+                level: LogLevel::Debug,
+                message: "step-2".into(),
+                data: None,
+            },
+        ];
+        Ok(output)
+    }
+}
+
+#[tokio::test]
+async fn dispatch_streams_effects_before_completed() {
+    let mut orch = TemporalOrch::new(TemporalConfig::default());
+    orch.register(OperatorId::new("effectful"), Arc::new(EffectfulOperator));
+
+    let mut handle = orch
+        .dispatch(
+            &DispatchContext::new(DispatchId::new("effectful"), OperatorId::new("effectful")),
+            simple_input("go"),
+        )
+        .await
+        .expect("dispatch should succeed");
+
+    // Receive events and verify ordering: EffectEmitted events BEFORE Completed.
+    let mut effects_received = Vec::new();
+    let mut completed_output = None;
+
+    while let Some(event) = handle.recv().await {
+        match event {
+            DispatchEvent::EffectEmitted { effect } => {
+                assert!(
+                    completed_output.is_none(),
+                    "EffectEmitted must arrive before Completed"
+                );
+                effects_received.push(effect);
+            }
+            DispatchEvent::Completed { output } => {
+                completed_output = Some(output);
+            }
+            DispatchEvent::Failed { error } => {
+                panic!("unexpected failure: {error}");
+            }
+            _ => {}
+        }
+    }
+
+    // Two EffectEmitted events should have been received.
+    assert_eq!(effects_received.len(), 2);
+    assert!(matches!(
+        &effects_received[0],
+        Effect::Log { message, level: LogLevel::Info, .. } if message == "step-1"
+    ));
+    assert!(matches!(
+        &effects_received[1],
+        Effect::Log { message, level: LogLevel::Debug, .. } if message == "step-2"
+    ));
+
+    // Completed output should also exist.
+    let output = completed_output.expect("Completed event must be received");
+    assert_eq!(output.message, Content::text("done"));
+}
+
+#[tokio::test]
+async fn dispatch_collect_includes_streamed_effects() {
+    let mut orch = TemporalOrch::new(TemporalConfig::default());
+    orch.register(OperatorId::new("effectful"), Arc::new(EffectfulOperator));
+
+    let output = orch
+        .dispatch(
+            &DispatchContext::new(DispatchId::new("effectful"), OperatorId::new("effectful")),
+            simple_input("go"),
+        )
+        .await
+        .expect("dispatch should succeed")
+        .collect()
+        .await
+        .expect("collect should succeed");
+
+    assert_eq!(output.effects.len(), 2);
+    assert!(matches!(
+        &output.effects[0],
+        Effect::Log { message, level: LogLevel::Info, .. } if message == "step-1"
+    ));
+    assert!(matches!(
+        &output.effects[1],
+        Effect::Log { message, level: LogLevel::Debug, .. } if message == "step-2"
+    ));
+}
