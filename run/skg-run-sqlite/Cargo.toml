@@ -11,6 +11,7 @@ keywords = ["skelegent", "durable", "run", "sqlite"]
 
 [dependencies]
 skg-run-core = { path = "../../../skelegent/orch/skg-run-core", version = "0.4.1" }
+layer0 = { path = "../../../skelegent/layer0", version = "0.4.1" }
 async-trait = "0.1"
 rusqlite = { version = "0.34", features = ["bundled"] }
 serde_json = "1"

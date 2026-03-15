@@ -68,6 +68,19 @@ fn migration_001(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_run_timers_wake_at
             ON run_timers (wake_at, run_id, wait_point);
 
+        CREATE TABLE IF NOT EXISTS checkpoints (
+            id          TEXT PRIMARY KEY,
+            run_id      TEXT NOT NULL,
+            step        INTEGER NOT NULL,
+            operator_id TEXT NOT NULL,
+            state       TEXT NOT NULL,
+            parent_id   TEXT,
+            created_at  INTEGER NOT NULL,
+            FOREIGN KEY (parent_id) REFERENCES checkpoints(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_checkpoints_run_id ON checkpoints(run_id, step);
+
         PRAGMA user_version = 1;
         "#,
     )?;
@@ -89,12 +102,12 @@ mod tests {
 
         let count: u32 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('run_records', 'run_resumes', 'run_signals', 'run_timers')",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('run_records', 'run_resumes', 'run_signals', 'run_timers', 'checkpoints')",
                 [],
                 |row| row.get(0),
             )
             .expect("count tables");
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
     }
 
     #[test]

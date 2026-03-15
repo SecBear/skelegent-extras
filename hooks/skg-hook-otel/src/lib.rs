@@ -145,9 +145,34 @@ impl DispatchMiddleware for OtelMiddleware {
 
         match &result {
             Ok(_) => {
+                span.set_attribute(KeyValue::new("skelegent.dispatch.success", true));
                 span.set_status(Status::Ok);
             }
             Err(err) => {
+                // Classify the error for structured observability.
+                use layer0::error::OperatorError;
+                let (error_code, retryable) = match err {
+                    OrchError::OperatorNotFound(_) => ("operator_not_found", false),
+                    OrchError::WorkflowNotFound(_) => ("workflow_not_found", false),
+                    OrchError::DispatchFailed(_) => ("dispatch_failed", true),
+                    OrchError::SignalFailed(_) => ("signal_failed", true),
+                    OrchError::OperatorError(op_err) => match op_err {
+                        OperatorError::Model { retryable, .. } => {
+                            if *retryable {
+                                ("model_error_retryable", true)
+                            } else {
+                                ("model_error", false)
+                            }
+                        }
+                        OperatorError::Retryable { .. } => ("retryable_error", true),
+                        OperatorError::Halted { .. } => ("halted", false),
+                        _ => ("operator_error", false),
+                    },
+                    OrchError::EnvironmentError(_) => ("environment_error", false),
+                    _ => ("unknown_error", false),
+                };
+                span.set_attribute(KeyValue::new("skelegent.error.code", error_code));
+                span.set_attribute(KeyValue::new("skelegent.error.retryable", retryable));
                 span.set_status(Status::Error {
                     description: err.to_string().into(),
                 });
@@ -186,7 +211,7 @@ mod tests {
         }
     }
 
-    /// Mock next layer that always fails.
+    /// Mock next layer that always fails with a plain dispatch error.
     struct FailNext;
 
     #[async_trait]
@@ -197,6 +222,21 @@ mod tests {
             _input: OperatorInput,
         ) -> Result<DispatchHandle, OrchError> {
             Err(OrchError::DispatchFailed("test failure".into()))
+        }
+    }
+
+    /// Mock next layer that fails with a structured OperatorError.
+    struct FailOperatorNext;
+
+    #[async_trait]
+    impl DispatchNext for FailOperatorNext {
+        async fn dispatch(
+            &self,
+            _ctx: &DispatchContext,
+            _input: OperatorInput,
+        ) -> Result<DispatchHandle, OrchError> {
+            use layer0::error::OperatorError;
+            Err(OrchError::OperatorError(OperatorError::model("test")))
         }
     }
 
@@ -229,6 +269,21 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("test failure"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn otel_mw_records_structured_error_attributes() {
+        // Verifies that the structured error classification code path executes
+        // without panicking. Span attribute inspection requires a custom OTel
+        // exporter and is deferred to integration tests.
+        let mw = OtelMiddleware::new("test-service");
+        let next = FailOperatorNext;
+        let ctx = test_ctx();
+
+        let result = mw.dispatch(&ctx, test_input(), &next).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("test"), "err: {err}");
     }
 
     #[tokio::test]
