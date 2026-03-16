@@ -314,7 +314,7 @@ impl EvalReport {
 pub struct EvalRunner {
     dispatcher: Arc<dyn Dispatcher>,
     operator_id: OperatorId,
-    metrics: Vec<Box<dyn EvalMetric>>,
+    metrics: Vec<Arc<dyn EvalMetric>>,
     concurrency: usize,
 }
 
@@ -333,7 +333,7 @@ impl EvalRunner {
 
     /// Add an evaluation metric. Builder-style — can be chained.
     pub fn with_metric(mut self, metric: impl EvalMetric + 'static) -> Self {
-        self.metrics.push(Box::new(metric));
+        self.metrics.push(Arc::new(metric));
         self
     }
 
@@ -349,20 +349,34 @@ impl EvalRunner {
     /// Up to `concurrency` cases execute concurrently; the rest wait in a queue.
     pub async fn run(&self, cases: Vec<EvalCase>) -> EvalReport {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.concurrency));
-        let mut futures = Vec::with_capacity(cases.len());
+        let mut join_set = tokio::task::JoinSet::new();
 
         for case in cases {
-            let permit = Arc::clone(&semaphore);
-            futures.push(async move {
-                let _permit = permit.acquire_owned().await.expect("semaphore closed");
-                self.run_one(case).await
+            let sem = Arc::clone(&semaphore);
+            let dispatcher = Arc::clone(&self.dispatcher);
+            let operator_id = self.operator_id.clone();
+            let metrics = self.metrics.clone();
+
+            join_set.spawn(async move {
+                let _permit = sem.acquire_owned().await.expect("semaphore closed");
+                run_case(dispatcher, operator_id, metrics, case).await
             });
         }
 
-        // Drive all futures concurrently, collecting results in order.
-        let mut results = Vec::with_capacity(futures.len());
-        for fut in futures {
-            results.push(fut.await);
+        let mut results = Vec::new();
+        while let Some(result) = join_set.join_next().await {
+            match result {
+                Ok(case_result) => results.push(case_result),
+                Err(e) => {
+                    // A task panic — record it as an error result with an empty name.
+                    results.push(CaseResult {
+                        name: "<panicked>".into(),
+                        scores: HashMap::new(),
+                        duration_ms: 0,
+                        error: Some(format!("task panicked: {e}")),
+                    });
+                }
+            }
         }
 
         EvalReport { cases: results }
@@ -419,6 +433,64 @@ impl EvalRunner {
             duration_ms,
             error: None,
         }
+    }
+}
+
+/// Free function that owns all resources needed to evaluate a single case.
+/// Used by [`EvalRunner::run`] to spawn tasks without borrowing `self`.
+async fn run_case(
+    dispatcher: Arc<dyn Dispatcher>,
+    operator_id: OperatorId,
+    metrics: Vec<Arc<dyn EvalMetric>>,
+    case: EvalCase,
+) -> CaseResult {
+    let start = Instant::now();
+    let dispatch_id = DispatchId::new(format!("eval-{}", case.name));
+    let ctx = DispatchContext::new(dispatch_id, operator_id);
+
+    let output_result = dispatcher
+        .dispatch(&ctx, case.input)
+        .await
+        .map_err(|e| e.to_string());
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    let handle = match output_result {
+        Err(e) => {
+            return CaseResult {
+                name: case.name,
+                scores: HashMap::new(),
+                duration_ms,
+                error: Some(e),
+            };
+        }
+        Ok(h) => h,
+    };
+
+    let output = match handle.collect().await {
+        Ok(o) => o,
+        Err(e) => {
+            return CaseResult {
+                name: case.name,
+                scores: HashMap::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("collect failed: {e}")),
+            };
+        }
+    };
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let mut scores = HashMap::new();
+    for metric in &metrics {
+        let score = metric.score(&output, &case.expected).await;
+        scores.insert(metric.name().to_owned(), score);
+    }
+
+    CaseResult {
+        name: case.name,
+        scores,
+        duration_ms,
+        error: None,
     }
 }
 
