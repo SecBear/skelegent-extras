@@ -44,6 +44,12 @@ impl SseFrame {
 /// - Empty lines signal end of frame and return `Some(frame)`, resetting state.
 /// - All other lines are ignored per the SSE spec.
 ///
+/// # Not yet handled
+///
+/// - `retry:` fields are parsed but ignored — reconnection backoff is not implemented.
+/// - `id:` fields (last-event-id) are parsed but ignored — reconnection with
+///   `Last-Event-ID` header is not implemented. TODO: add reconnection support.
+///
 /// Returns `Some(frame)` when an empty line terminates a non-empty frame,
 /// `None` otherwise.
 fn parse_sse_line(line: &str, frame: &mut SseFrame) -> Option<SseFrame> {
@@ -66,7 +72,8 @@ fn parse_sse_line(line: &str, frame: &mut SseFrame) -> Option<SseFrame> {
     }
 
     if let Some(rest) = line.strip_prefix("data:") {
-        let chunk = rest.trim_start_matches(' ');
+        // SSE spec: strip at most one leading space after the colon.
+        let chunk = rest.strip_prefix(' ').unwrap_or(rest);
         match frame.data.as_mut() {
             Some(existing) => {
                 existing.push('\n');
@@ -225,7 +232,10 @@ async fn handle_frame(
     // before attempting strongly-typed deserialization.
     let value: serde_json::Value = match serde_json::from_str(&data) {
         Ok(v) => v,
-        Err(_) => return false,
+        Err(e) => {
+            tracing::debug!("SSE frame parse failed: {}", e);
+            return false;
+        }
     };
 
     let event_type = match value.get("type").and_then(|v| v.as_str()) {

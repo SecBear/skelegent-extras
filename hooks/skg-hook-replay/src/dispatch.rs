@@ -7,7 +7,7 @@ use layer0::dispatch_context::DispatchContext;
 use layer0::error::OrchError;
 use layer0::id::DispatchId;
 use layer0::operator::{OperatorInput, OperatorOutput};
-use skg_hook_recorder::{Boundary, Phase, RecordEntry};
+use skg_hook_recorder::{Boundary, Phase, RecordEntry, SCHEMA_VERSION};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -43,16 +43,29 @@ impl ReplayDispatcher {
     ///
     /// Filters for [`Boundary::Dispatch`] + [`Phase::Post`] entries only.
     /// Other entries (Pre-phase, non-Dispatch boundaries) are discarded.
-    pub fn new(recordings: Vec<RecordEntry>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplayError::VersionMismatch`] if any entry's `version` does
+    /// not match [`skg_hook_recorder::SCHEMA_VERSION`].
+    pub fn new(recordings: Vec<RecordEntry>) -> Result<Self, ReplayError> {
+        for entry in &recordings {
+            if entry.version != SCHEMA_VERSION {
+                return Err(ReplayError::VersionMismatch {
+                    recorded: entry.version,
+                    current: SCHEMA_VERSION,
+                });
+            }
+        }
         let recordings = recordings
             .into_iter()
             .filter(|e| e.boundary == Boundary::Dispatch && e.phase == Phase::Post)
             .collect();
-        Self {
+        Ok(Self {
             recordings,
             index: AtomicUsize::new(0),
             strategy: MatchStrategy::Sequential,
-        }
+        })
     }
 
     /// Override the match strategy.
@@ -204,7 +217,7 @@ mod tests {
             .map(|(i, o)| make_dispatch_post_entry("op", &format!("d-{i}"), o))
             .collect();
 
-        let dispatcher = ReplayDispatcher::new(entries);
+        let dispatcher = ReplayDispatcher::new(entries).unwrap();
         let ctx = make_ctx("op");
 
         let out0 = dispatcher
@@ -238,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn replay_dispatch_exhausted() {
         let entry = make_dispatch_post_entry("op", "d-0", &make_output("only"));
-        let dispatcher = ReplayDispatcher::new(vec![entry]);
+        let dispatcher = ReplayDispatcher::new(vec![entry]).unwrap();
         let ctx = make_ctx("op");
 
         // First call succeeds.
@@ -261,7 +274,7 @@ mod tests {
     #[tokio::test]
     async fn replay_dispatch_error_entry() {
         let entry = make_error_post_entry("op");
-        let dispatcher = ReplayDispatcher::new(vec![entry]);
+        let dispatcher = ReplayDispatcher::new(vec![entry]).unwrap();
         let ctx = make_ctx("op");
 
         let err = dispatcher
@@ -284,7 +297,7 @@ mod tests {
             version: SCHEMA_VERSION,
         };
         let real = make_dispatch_post_entry("op", "d-0", &make_output("real"));
-        let dispatcher = ReplayDispatcher::new(vec![pre, real]);
+        let dispatcher = ReplayDispatcher::new(vec![pre, real]).unwrap();
 
         let ctx = make_ctx("op");
         // Only one valid entry, so the first call should succeed with "real".

@@ -1,7 +1,7 @@
 //! [`ReplayProvider`] — deterministic replay of recorded infer/embed operations.
 
 use crate::ReplayError;
-use skg_hook_recorder::{Boundary, Phase, RecordEntry};
+use skg_hook_recorder::{Boundary, Phase, RecordEntry, SCHEMA_VERSION};
 use skg_turn::embedding::{EmbedRequest, EmbedResponse};
 use skg_turn::infer::{InferRequest, InferResponse};
 use skg_turn::provider::{Provider, ProviderError};
@@ -45,7 +45,20 @@ impl ReplayProvider {
     ///
     /// Filters for [`Boundary::Infer`] / [`Boundary::Embed`] + [`Phase::Post`]
     /// entries. Other entries are discarded.
-    pub fn new(recordings: Vec<RecordEntry>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplayError::VersionMismatch`] if any entry's `version` does
+    /// not match [`skg_hook_recorder::SCHEMA_VERSION`].
+    pub fn new(recordings: Vec<RecordEntry>) -> Result<Self, ReplayError> {
+        for entry in &recordings {
+            if entry.version != SCHEMA_VERSION {
+                return Err(ReplayError::VersionMismatch {
+                    recorded: entry.version,
+                    current: SCHEMA_VERSION,
+                });
+            }
+        }
         let mut infer_recordings = Vec::new();
         let mut embed_recordings = Vec::new();
         for entry in recordings {
@@ -57,12 +70,12 @@ impl ReplayProvider {
                 }
             }
         }
-        Self {
+        Ok(Self {
             infer_recordings,
             embed_recordings,
             infer_index: AtomicUsize::new(0),
             embed_index: AtomicUsize::new(0),
-        }
+        })
     }
 }
 
@@ -197,7 +210,7 @@ mod tests {
         let r2 = make_infer_response("second response");
         let entries = vec![infer_post_entry(&r1), infer_post_entry(&r2)];
 
-        let provider = ReplayProvider::new(entries);
+        let provider = ReplayProvider::new(entries).unwrap();
 
         let resp0 = provider.infer(make_infer_request()).await.unwrap();
         assert_eq!(resp0.content.as_text(), Some("first response"));
@@ -210,7 +223,7 @@ mod tests {
     async fn replay_provider_infer_exhausted() {
         let r = make_infer_response("only");
         let entries = vec![infer_post_entry(&r)];
-        let provider = ReplayProvider::new(entries);
+        let provider = ReplayProvider::new(entries).unwrap();
 
         provider.infer(make_infer_request()).await.expect("first");
 
@@ -230,7 +243,7 @@ mod tests {
         let r2 = make_embed_response(vec![vec![0.4, 0.5, 0.6], vec![0.7, 0.8, 0.9]]);
         let entries = vec![embed_post_entry(&r1), embed_post_entry(&r2)];
 
-        let provider = ReplayProvider::new(entries);
+        let provider = ReplayProvider::new(entries).unwrap();
 
         let resp0 = provider.embed(make_embed_request()).await.unwrap();
         assert_eq!(resp0.embeddings.len(), 1);
@@ -243,7 +256,7 @@ mod tests {
     #[tokio::test]
     async fn replay_provider_embed_exhausted() {
         let r = make_embed_response(vec![vec![0.1]]);
-        let provider = ReplayProvider::new(vec![embed_post_entry(&r)]);
+        let provider = ReplayProvider::new(vec![embed_post_entry(&r)]).unwrap();
 
         provider.embed(make_embed_request()).await.expect("first");
 
@@ -264,7 +277,7 @@ mod tests {
         let er = make_embed_response(vec![vec![1.0]]);
         let entries = vec![infer_post_entry(&ir), embed_post_entry(&er)];
 
-        let provider = ReplayProvider::new(entries);
+        let provider = ReplayProvider::new(entries).unwrap();
 
         let embed_resp = provider.embed(make_embed_request()).await.unwrap();
         assert_eq!(embed_resp.embeddings.len(), 1);

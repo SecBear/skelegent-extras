@@ -228,6 +228,10 @@ impl InferApprovalGuard {
     /// let guard = InferApprovalGuard::budget_limit(0.10, 0.000_001);
     /// ```
     pub fn budget_limit(max_cost_usd: f64, cost_per_token: f64) -> Self {
+        debug_assert!(
+            cost_per_token > 0.0,
+            "zero cost_per_token means budget_limit will allow everything"
+        );
         Self::new(move |request| {
             if let Some(max_tokens) = request.max_tokens {
                 let estimated_cost = max_tokens as f64 * cost_per_token;

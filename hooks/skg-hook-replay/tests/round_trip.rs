@@ -255,7 +255,7 @@ async fn dispatch_round_trip_three_cases() {
 
     // --- REPLAY PHASE ---
 
-    let replay = ReplayDispatcher::new(replay_entries);
+    let replay = ReplayDispatcher::new(replay_entries).expect("build ReplayDispatcher");
     let replay_ctx = make_ctx("any-op", "r-001");
 
     let replayed: Vec<OperatorOutput> = {

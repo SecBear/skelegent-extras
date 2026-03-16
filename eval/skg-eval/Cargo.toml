@@ -21,3 +21,5 @@ thiserror = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+skg-hook-replay = { path = "../../hooks/skg-hook-replay" }
+skg-hook-recorder = { path = "../../../skelegent/hooks/skg-hook-recorder" }
