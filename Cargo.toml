@@ -16,6 +16,8 @@ members = [
   "run/skg-run-sqlite",
   "a2a/skg-a2a",
   "hooks/skg-hook-otel",
+  "hooks/skg-hook-replay",
+  "hooks/skg-hook-approval",
   "eval/skg-eval",
 ]
 

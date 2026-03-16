@@ -14,9 +14,16 @@
 //! ```
 
 use async_trait::async_trait;
-use layer0::operator::{OperatorInput, OperatorOutput};
+use layer0::dispatch::Dispatcher;
+use layer0::dispatch_context::DispatchContext;
+use layer0::id::{DispatchId, OperatorId};
+use layer0::operator::{OperatorInput, OperatorOutput, TriggerType};
 use serde::{Deserialize, Serialize};
+use skg_provider_router::DynProvider;
+use skg_turn::embedding::EmbedRequest;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
 use thiserror::Error;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -288,6 +295,368 @@ impl EvalReport {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// RUNNER
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Runs evaluation cases against an agent via a [`Dispatcher`] and scores
+/// them with one or more [`EvalMetric`]s.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let runner = EvalRunner::new(dispatcher, OperatorId::new("my-agent"))
+///     .with_metric(ExactMatchMetric)
+///     .with_concurrency(8);
+///
+/// let report = runner.run(cases).await;
+/// println!("mean exact_match: {}", report.mean_score("exact_match"));
+/// ```
+pub struct EvalRunner {
+    dispatcher: Arc<dyn Dispatcher>,
+    operator_id: OperatorId,
+    metrics: Vec<Box<dyn EvalMetric>>,
+    concurrency: usize,
+}
+
+impl EvalRunner {
+    /// Create a new runner that dispatches to `operator_id` via `dispatcher`.
+    ///
+    /// Default concurrency is 4. Add metrics with [`with_metric`](Self::with_metric).
+    pub fn new(dispatcher: Arc<dyn Dispatcher>, operator_id: OperatorId) -> Self {
+        Self {
+            dispatcher,
+            operator_id,
+            metrics: Vec::new(),
+            concurrency: 4,
+        }
+    }
+
+    /// Add an evaluation metric. Builder-style — can be chained.
+    pub fn with_metric(mut self, metric: impl EvalMetric + 'static) -> Self {
+        self.metrics.push(Box::new(metric));
+        self
+    }
+
+    /// Set the maximum number of cases to run concurrently.
+    pub fn with_concurrency(mut self, n: usize) -> Self {
+        self.concurrency = n;
+        self
+    }
+
+    /// Run all cases and produce an aggregated [`EvalReport`].
+    ///
+    /// Cases are run with bounded concurrency (see [`with_concurrency`](Self::with_concurrency)).
+    /// Up to `concurrency` cases execute concurrently; the rest wait in a queue.
+    pub async fn run(&self, cases: Vec<EvalCase>) -> EvalReport {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(self.concurrency));
+        let mut futures = Vec::with_capacity(cases.len());
+
+        for case in cases {
+            let permit = Arc::clone(&semaphore);
+            futures.push(async move {
+                let _permit = permit.acquire_owned().await.expect("semaphore closed");
+                self.run_one(case).await
+            });
+        }
+
+        // Drive all futures concurrently, collecting results in order.
+        let mut results = Vec::with_capacity(futures.len());
+        for fut in futures {
+            results.push(fut.await);
+        }
+
+        EvalReport { cases: results }
+    }
+
+    /// Run a single case. Useful for debugging individual cases.
+    pub async fn run_one(&self, case: EvalCase) -> CaseResult {
+        let start = Instant::now();
+        let dispatch_id = DispatchId::new(format!("eval-{}", case.name));
+        let ctx = DispatchContext::new(dispatch_id, self.operator_id.clone());
+
+        let output_result = self
+            .dispatcher
+            .dispatch(&ctx, case.input)
+            .await
+            .map_err(|e| e.to_string());
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let handle = match output_result {
+            Err(e) => {
+                return CaseResult {
+                    name: case.name,
+                    scores: HashMap::new(),
+                    duration_ms,
+                    error: Some(e),
+                };
+            }
+            Ok(h) => h,
+        };
+
+        let output = match handle.collect().await {
+            Ok(o) => o,
+            Err(e) => {
+                return CaseResult {
+                    name: case.name,
+                    scores: HashMap::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    error: Some(format!("collect failed: {e}")),
+                };
+            }
+        };
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let mut scores = HashMap::new();
+        for metric in &self.metrics {
+            let score = metric.score(&output, &case.expected).await;
+            scores.insert(metric.name().to_owned(), score);
+        }
+
+        CaseResult {
+            name: case.name,
+            scores,
+            duration_ms,
+            error: None,
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// LLM JUDGE METRIC
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Scores agent output by asking a judge LLM to evaluate it.
+///
+/// The judge is invoked via a [`Dispatcher`] targeting a configured operator.
+/// It receives a prompt containing the rubric, expected output, and actual
+/// output, and should respond with a float between 0.0 and 1.0 followed by
+/// an explanation.
+pub struct LlmJudgeMetric {
+    dispatcher: Arc<dyn Dispatcher>,
+    judge_operator: OperatorId,
+    rubric: String,
+}
+
+impl LlmJudgeMetric {
+    /// Create a new judge metric.
+    ///
+    /// - `dispatcher` — used to invoke the judge operator.
+    /// - `judge_operator` — the operator ID of the LLM judge.
+    /// - `rubric` — evaluation criteria shown to the judge.
+    pub fn new(
+        dispatcher: Arc<dyn Dispatcher>,
+        judge_operator: OperatorId,
+        rubric: impl Into<String>,
+    ) -> Self {
+        Self {
+            dispatcher,
+            judge_operator,
+            rubric: rubric.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl EvalMetric for LlmJudgeMetric {
+    fn name(&self) -> &str {
+        "llm_judge"
+    }
+
+    async fn score(&self, output: &OperatorOutput, expected: &ExpectedOutput) -> Score {
+        let expected_text = match expected {
+            ExpectedOutput::ExactText(s) => s.clone(),
+            ExpectedOutput::Contains(v) => v.join(", "),
+            ExpectedOutput::ToolTrajectory(v) => format!("tools: {}", v.join(" -> ")),
+            ExpectedOutput::Custom(_) => "<custom>".into(),
+        };
+        let actual_text = output.message.as_text().unwrap_or_default();
+
+        let prompt = format!(
+            "Given this rubric: {rubric}\nExpected: {expected}\nActual: {actual}\nScore 0.0-1.0 and explain.",
+            rubric = self.rubric,
+            expected = expected_text,
+            actual = actual_text,
+        );
+
+        let input = OperatorInput::new(
+            layer0::content::Content::text(prompt),
+            TriggerType::Task,
+        );
+        let ctx = DispatchContext::new(
+            DispatchId::new("eval-judge"),
+            self.judge_operator.clone(),
+        );
+
+        let handle = match self.dispatcher.dispatch(&ctx, input).await {
+            Ok(h) => h,
+            Err(e) => {
+                return Score::with_explanation(0.0, format!("judge dispatch failed: {e}"));
+            }
+        };
+
+        let judge_output = match handle.collect().await {
+            Ok(o) => o,
+            Err(e) => {
+                return Score::with_explanation(0.0, format!("judge collect failed: {e}"));
+            }
+        };
+
+        let response_text = judge_output.message.as_text().unwrap_or_default();
+
+        // Parse the first float found in the response.
+        let score_value = parse_first_float(response_text);
+        let clamped = score_value.clamp(0.0, 1.0);
+
+        Score::with_explanation(clamped, response_text.to_owned())
+    }
+}
+
+/// Extract the first floating-point number from a string.
+/// Returns 0.0 if none is found.
+fn parse_first_float(text: &str) -> f64 {
+    let mut start = None;
+    let mut has_dot = false;
+
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '0'..='9' => {
+                if start.is_none() {
+                    start = Some(i);
+                }
+            }
+            '.' if start.is_some() && !has_dot => {
+                has_dot = true;
+            }
+            _ => {
+                if let Some(s) = start {
+                    let candidate = &text[s..i];
+                    if let Ok(v) = candidate.parse::<f64>() {
+                        return v;
+                    }
+                    start = None;
+                    has_dot = false;
+                }
+            }
+        }
+    }
+
+    // Check at end of string.
+    if let Some(s) = start {
+        if let Ok(v) = text[s..].parse::<f64>() {
+            return v;
+        }
+    }
+
+    0.0
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SEMANTIC SIMILARITY METRIC
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Scores by computing cosine similarity between expected and actual embeddings.
+///
+/// Requires a [`DynProvider`] that supports the `embed` operation. The score
+/// equals the cosine similarity (clamped to [0.0, 1.0]).
+pub struct SemanticSimilarityMetric {
+    provider: Arc<dyn DynProvider>,
+    model: String,
+    threshold: f64,
+}
+
+impl SemanticSimilarityMetric {
+    /// Create a new semantic similarity metric using the given provider and model.
+    ///
+    /// Default threshold is 0.8 (scores below this threshold are returned as-is;
+    /// the threshold does not gate the score but is available for callers that
+    /// want to treat it as a pass/fail cutoff).
+    pub fn new(provider: Arc<dyn DynProvider>, model: impl Into<String>) -> Self {
+        Self {
+            provider,
+            model: model.into(),
+            threshold: 0.8,
+        }
+    }
+
+    /// Set the similarity threshold.
+    pub fn with_threshold(mut self, threshold: f64) -> Self {
+        self.threshold = threshold;
+        self
+    }
+
+    /// Return the configured similarity threshold.
+    pub fn threshold(&self) -> f64 {
+        self.threshold
+    }
+}
+
+#[async_trait]
+impl EvalMetric for SemanticSimilarityMetric {
+    fn name(&self) -> &str {
+        "semantic_similarity"
+    }
+
+    async fn score(&self, output: &OperatorOutput, expected: &ExpectedOutput) -> Score {
+        let expected_text = match expected {
+            ExpectedOutput::ExactText(s) => s.clone(),
+            ExpectedOutput::Contains(v) => v.join(" "),
+            ExpectedOutput::ToolTrajectory(v) => v.join(" "),
+            ExpectedOutput::Custom(_) => {
+                return Score::with_explanation(
+                    0.0,
+                    "SemanticSimilarityMetric cannot score Custom expectations",
+                );
+            }
+        };
+        let actual_text = output.message.as_text().unwrap_or_default().to_owned();
+
+        let request = EmbedRequest::new(vec![expected_text.clone(), actual_text.clone()])
+            .with_model(&self.model);
+
+        let embed_response = match self.provider.embed_boxed(request).await {
+            Ok(r) => r,
+            Err(e) => {
+                return Score::with_explanation(0.0, format!("embed failed: {e}"));
+            }
+        };
+
+        if embed_response.embeddings.len() < 2 {
+            return Score::with_explanation(
+                0.0,
+                "embed returned fewer than 2 embeddings",
+            );
+        }
+
+        let a = &embed_response.embeddings[0].vector;
+        let b = &embed_response.embeddings[1].vector;
+        let similarity = cosine_similarity(a, b);
+        let clamped = similarity.clamp(0.0, 1.0);
+
+        Score::with_explanation(
+            clamped,
+            format!(
+                "cosine similarity {clamped:.4} (threshold {threshold:.2})",
+                threshold = self.threshold
+            ),
+        )
+    }
+}
+
+/// Compute cosine similarity between two vectors.
+///
+/// Returns 0.0 if either vector has zero magnitude (to avoid NaN).
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    let dot: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| x as f64 * y as f64).sum();
+    let norm_a: f64 = a.iter().map(|&x| (x as f64).powi(2)).sum::<f64>().sqrt();
+    let norm_b: f64 = b.iter().map(|&x| (x as f64).powi(2)).sum::<f64>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // ERRORS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -445,5 +814,133 @@ mod tests {
         let input = OperatorInput::new(Content::text("hi"), TriggerType::User);
         let case = EvalCase::new("test", input, ExpectedOutput::ExactText("hi".into()));
         assert_eq!(case.name, "test");
+    }
+
+    // ── EvalRunner tests ────────────────────────────────────────────────────
+
+    use layer0::dispatch::{DispatchEvent, DispatchHandle};
+    use layer0::error::OrchError;
+
+    /// Mock dispatcher that always returns a fixed OperatorOutput.
+    struct MockDispatcher {
+        output: OperatorOutput,
+    }
+
+    impl MockDispatcher {
+        fn returning(text: &str) -> Arc<Self> {
+            Arc::new(Self {
+                output: test_output(text),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Dispatcher for MockDispatcher {
+        async fn dispatch(
+            &self,
+            ctx: &layer0::dispatch_context::DispatchContext,
+            _input: OperatorInput,
+        ) -> Result<DispatchHandle, OrchError> {
+            let dispatch_id = ctx.dispatch_id.clone();
+            let (handle, sender) = DispatchHandle::channel(dispatch_id);
+            let output = self.output.clone();
+            tokio::spawn(async move {
+                let _ = sender
+                    .send(DispatchEvent::Completed { output })
+                    .await;
+            });
+            Ok(handle)
+        }
+    }
+
+    /// Mock dispatcher that always returns a dispatch error.
+    struct ErrorDispatcher;
+
+    #[async_trait]
+    impl Dispatcher for ErrorDispatcher {
+        async fn dispatch(
+            &self,
+            _ctx: &layer0::dispatch_context::DispatchContext,
+            _input: OperatorInput,
+        ) -> Result<DispatchHandle, OrchError> {
+            Err(OrchError::DispatchFailed("mock error".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn eval_runner_runs_cases() {
+        use layer0::operator::TriggerType;
+
+        let dispatcher = MockDispatcher::returning("hello");
+        let runner = EvalRunner::new(dispatcher, OperatorId::new("test-op"))
+            .with_metric(ExactMatchMetric)
+            .with_concurrency(2);
+
+        let cases = vec![
+            EvalCase::new(
+                "case-a",
+                OperatorInput::new(Content::text("hi"), TriggerType::User),
+                ExpectedOutput::ExactText("hello".into()),
+            ),
+            EvalCase::new(
+                "case-b",
+                OperatorInput::new(Content::text("hi"), TriggerType::User),
+                ExpectedOutput::ExactText("hello".into()),
+            ),
+        ];
+
+        let report = runner.run(cases).await;
+        assert_eq!(report.total_cases(), 2);
+        assert_eq!(report.perfect_cases(), 2);
+        assert!((report.mean_score("exact_match") - 1.0).abs() < f64::EPSILON);
+        for case in &report.cases {
+            assert!(case.error.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn eval_runner_handles_dispatch_error() {
+        use layer0::operator::TriggerType;
+
+        let dispatcher = Arc::new(ErrorDispatcher);
+        let runner = EvalRunner::new(dispatcher, OperatorId::new("test-op"))
+            .with_metric(ExactMatchMetric);
+
+        let cases = vec![EvalCase::new(
+            "failing-case",
+            OperatorInput::new(Content::text("hi"), TriggerType::User),
+            ExpectedOutput::ExactText("anything".into()),
+        )];
+
+        let report = runner.run(cases).await;
+        assert_eq!(report.total_cases(), 1);
+        let case_result = &report.cases[0];
+        assert!(case_result.error.is_some(), "expected an error to be recorded");
+        assert!(case_result.scores.is_empty());
+    }
+
+    // ── Cosine similarity tests ─────────────────────────────────────────────
+
+    #[test]
+    fn cosine_similarity_identical() {
+        let v = vec![1.0_f32, 0.0, 1.0, 0.0];
+        let sim = cosine_similarity(&v, &v);
+        assert!((sim - 1.0).abs() < 1e-9, "identical vectors → 1.0, got {sim}");
+    }
+
+    #[test]
+    fn cosine_similarity_orthogonal() {
+        let a = vec![1.0_f32, 0.0];
+        let b = vec![0.0_f32, 1.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim.abs() < 1e-9, "orthogonal vectors → 0.0, got {sim}");
+    }
+
+    #[test]
+    fn cosine_similarity_zero_vector() {
+        let a = vec![0.0_f32, 0.0];
+        let b = vec![1.0_f32, 1.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 0.0).abs() < 1e-9, "zero vector → 0.0, got {sim}");
     }
 }

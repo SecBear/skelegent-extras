@@ -1,0 +1,22 @@
+[package]
+name = "skg-hook-replay"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Deterministic replay engine for skelegent recorded operations"
+publish = false
+
+[dependencies]
+layer0 = { path = "../../../skelegent/layer0", version = "0.4.1" }
+skg-turn = { path = "../../../skelegent/turn/skg-turn", version = "0.4.1" }
+skg-hook-recorder = { path = "../../../skelegent/hooks/skg-hook-recorder", version = "0.4.1" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

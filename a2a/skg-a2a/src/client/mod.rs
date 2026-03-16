@@ -1,5 +1,9 @@
 //! A2A client that implements [`Dispatcher`] by calling a remote A2A agent.
 
+pub mod stream;
+
+pub use stream::dispatch_streaming;
+
 use async_trait::async_trait;
 use layer0::content::Content;
 use layer0::dispatch::{DispatchEvent, DispatchHandle, Dispatcher};
@@ -72,6 +76,32 @@ impl A2aDispatcher {
             .ok_or_else(|| {
                 OrchError::DispatchFailed("agent card has no interfaces".into())
             })
+    }
+
+    /// Dispatch using streaming SSE if the agent card advertises streaming
+    /// capability, falling back to the sync [`Dispatcher::dispatch`] otherwise.
+    ///
+    /// When streaming is available this calls [`dispatch_streaming`] with the
+    /// first interface URL from the agent card.  When `capabilities.streaming`
+    /// is `None` or `false`, this falls through to the synchronous
+    /// [`Dispatcher::dispatch`] implementation.
+    pub async fn dispatch_auto(
+        &self,
+        ctx: &DispatchContext,
+        input: OperatorInput,
+    ) -> Result<DispatchHandle, OrchError> {
+        let streaming_supported = self
+            .card
+            .capabilities
+            .streaming
+            .unwrap_or(false);
+
+        if streaming_supported {
+            let url = self.endpoint_url()?.to_owned();
+            stream::dispatch_streaming(&self.http, &url, input).await
+        } else {
+            self.dispatch(ctx, input).await
+        }
     }
 }
 

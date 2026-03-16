@@ -1,14 +1,19 @@
 #![deny(missing_docs)]
-//! OpenTelemetry dispatch middleware for skelegent.
+//! OpenTelemetry middleware for skelegent.
 //!
-//! Bridges [`layer0::TraceContext`] with the OpenTelemetry tracing API.
-//! Wraps every dispatch in an OTel span, propagating trace/span IDs
-//! between the skelegent context and the OTel [`Context`].
+//! Provides two families of middleware:
+//!
+//! - [`OtelMiddleware`] — wraps dispatch calls in OTel spans with
+//!   `skelegent.*` attributes (bridges [`layer0::TraceContext`]).
+//! - [`OtelInferMiddleware`] — wraps provider inference calls in OTel spans
+//!   following the `gen_ai.*` semantic conventions.
+//! - [`OtelEmbedMiddleware`] — wraps provider embed calls in OTel spans
+//!   following the `gen_ai.*` semantic conventions.
 //!
 //! # Usage
 //!
 //! ```rust,ignore
-//! use skg_hook_otel::OtelMiddleware;
+//! use skg_hook_otel::{OtelMiddleware, OtelInferMiddleware, OtelEmbedMiddleware};
 //! use layer0::middleware::DispatchStack;
 //!
 //! let stack = DispatchStack::builder()
@@ -26,6 +31,10 @@ use opentelemetry::trace::{
     Span as _, SpanContext, Status, TraceContextExt, TraceFlags, TraceState, Tracer,
 };
 use opentelemetry::{global, Context, KeyValue, SpanId, TraceId};
+use skg_turn::embedding::{EmbedRequest, EmbedResponse};
+use skg_turn::infer::{InferRequest, InferResponse};
+use skg_turn::infer_middleware::{EmbedMiddleware, EmbedNext, InferMiddleware, InferNext};
+use skg_turn::provider::ProviderError;
 
 /// Dispatch middleware that creates OpenTelemetry spans for every dispatch.
 ///
@@ -173,6 +182,157 @@ impl DispatchMiddleware for OtelMiddleware {
                 };
                 span.set_attribute(KeyValue::new("skelegent.error.code", error_code));
                 span.set_attribute(KeyValue::new("skelegent.error.retryable", retryable));
+                span.set_status(Status::Error {
+                    description: err.to_string().into(),
+                });
+            }
+        }
+
+        span.end();
+        result
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// OtelInferMiddleware — gen_ai.* semconv for inference
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Infer middleware that creates OpenTelemetry spans following the
+/// [OTel GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
+///
+/// Before inference: starts a `gen_ai.chat` span and records request
+/// attributes (`gen_ai.operation.name`, `gen_ai.request.model`,
+/// `gen_ai.request.max_tokens`).
+///
+/// After inference: records response attributes
+/// (`gen_ai.response.model`, `gen_ai.usage.input_tokens`,
+/// `gen_ai.usage.output_tokens`) on success, or sets an `Error` span
+/// status on failure.
+pub struct OtelInferMiddleware {
+    tracer_name: &'static str,
+}
+
+impl OtelInferMiddleware {
+    /// Create a new OTel infer middleware with the given tracer/service name.
+    pub fn new(tracer_name: &'static str) -> Self {
+        Self { tracer_name }
+    }
+}
+
+#[async_trait]
+impl InferMiddleware for OtelInferMiddleware {
+    /// Wrap an inference call in a `gen_ai.chat` OTel span.
+    ///
+    /// 1. Start a fresh `gen_ai.chat` span (no parent propagation).
+    /// 2. Record pre-call `gen_ai.*` request attributes.
+    /// 3. Forward to the next layer via `next.infer(request).await`.
+    /// 4. Record post-call response attributes on success, or set
+    ///    `Error` status on failure.
+    async fn infer(
+        &self,
+        request: InferRequest,
+        next: &dyn InferNext,
+    ) -> Result<InferResponse, ProviderError> {
+        let tracer = global::tracer(self.tracer_name);
+        let mut span = tracer.start("gen_ai.chat");
+
+        span.set_attribute(KeyValue::new("gen_ai.operation.name", "chat"));
+        if let Some(ref model) = request.model {
+            span.set_attribute(KeyValue::new("gen_ai.request.model", model.clone()));
+        }
+        if let Some(max_tokens) = request.max_tokens {
+            span.set_attribute(KeyValue::new(
+                "gen_ai.request.max_tokens",
+                max_tokens as i64,
+            ));
+        }
+
+        let result = next.infer(request).await;
+
+        match &result {
+            Ok(response) => {
+                span.set_attribute(KeyValue::new(
+                    "gen_ai.response.model",
+                    response.model.clone(),
+                ));
+                span.set_attribute(KeyValue::new(
+                    "gen_ai.usage.input_tokens",
+                    response.usage.input_tokens as i64,
+                ));
+                span.set_attribute(KeyValue::new(
+                    "gen_ai.usage.output_tokens",
+                    response.usage.output_tokens as i64,
+                ));
+                span.set_status(Status::Ok);
+            }
+            Err(err) => {
+                span.set_status(Status::Error {
+                    description: err.to_string().into(),
+                });
+            }
+        }
+
+        span.end();
+        result
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// OtelEmbedMiddleware — gen_ai.* semconv for embedding
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Embed middleware that creates OpenTelemetry spans following the
+/// [OTel GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/).
+///
+/// Before embedding: starts a `gen_ai.embed` span and records request
+/// attributes (`gen_ai.operation.name`, `gen_ai.request.model`).
+///
+/// After embedding: records `gen_ai.usage.input_tokens` on success, or
+/// sets an `Error` span status on failure.
+pub struct OtelEmbedMiddleware {
+    tracer_name: &'static str,
+}
+
+impl OtelEmbedMiddleware {
+    /// Create a new OTel embed middleware with the given tracer/service name.
+    pub fn new(tracer_name: &'static str) -> Self {
+        Self { tracer_name }
+    }
+}
+
+#[async_trait]
+impl EmbedMiddleware for OtelEmbedMiddleware {
+    /// Wrap an embed call in a `gen_ai.embed` OTel span.
+    ///
+    /// 1. Start a fresh `gen_ai.embed` span (no parent propagation).
+    /// 2. Record pre-call `gen_ai.*` request attributes.
+    /// 3. Forward to the next layer via `next.embed(request).await`.
+    /// 4. Record `gen_ai.usage.input_tokens` on success, or set `Error`
+    ///    status on failure.
+    async fn embed(
+        &self,
+        request: EmbedRequest,
+        next: &dyn EmbedNext,
+    ) -> Result<EmbedResponse, ProviderError> {
+        let tracer = global::tracer(self.tracer_name);
+        let mut span = tracer.start("gen_ai.embed");
+
+        span.set_attribute(KeyValue::new("gen_ai.operation.name", "embed"));
+        if let Some(ref model) = request.model {
+            span.set_attribute(KeyValue::new("gen_ai.request.model", model.clone()));
+        }
+
+        let result = next.embed(request).await;
+
+        match &result {
+            Ok(response) => {
+                span.set_attribute(KeyValue::new(
+                    "gen_ai.usage.input_tokens",
+                    response.usage.input_tokens as i64,
+                ));
+                span.set_status(Status::Ok);
+            }
+            Err(err) => {
                 span.set_status(Status::Error {
                     description: err.to_string().into(),
                 });
@@ -336,5 +496,122 @@ mod tests {
         let handle = mw.dispatch(&ctx, test_input(), &CtxCapture).await.unwrap();
         let output = handle.collect().await.unwrap();
         assert_eq!(output.message.as_text().unwrap(), "captured");
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // OtelInferMiddleware tests
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    use skg_turn::embedding::{Embedding, EmbedRequest, EmbedResponse};
+    use skg_turn::infer::{InferRequest, InferResponse};
+    use skg_turn::infer_middleware::{EmbedNext, InferNext};
+    use skg_turn::provider::ProviderError;
+    use skg_turn::types::{StopReason, TokenUsage};
+
+    /// Mock infer next that echoes back a fixed response.
+    struct EchoInferNext;
+
+    #[async_trait]
+    impl InferNext for EchoInferNext {
+        async fn infer(&self, _request: InferRequest) -> Result<InferResponse, ProviderError> {
+            Ok(InferResponse {
+                content: layer0::content::Content::text("echo"),
+                tool_calls: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    reasoning_tokens: None,
+                },
+                model: "test-model".into(),
+                cost: None,
+                truncated: None,
+            })
+        }
+    }
+
+    /// Mock infer next that always fails.
+    struct FailInferNext;
+
+    #[async_trait]
+    impl InferNext for FailInferNext {
+        async fn infer(&self, _request: InferRequest) -> Result<InferResponse, ProviderError> {
+            Err(ProviderError::TransientError {
+                message: "test failure".into(),
+                status: None,
+            })
+        }
+    }
+
+    /// Mock embed next that echoes back a fixed response.
+    struct EchoEmbedNext;
+
+    #[async_trait]
+    impl EmbedNext for EchoEmbedNext {
+        async fn embed(&self, _request: EmbedRequest) -> Result<EmbedResponse, ProviderError> {
+            Ok(EmbedResponse {
+                embeddings: vec![Embedding {
+                    vector: vec![0.1, 0.2, 0.3],
+                }],
+                model: "embed-model".into(),
+                usage: TokenUsage {
+                    input_tokens: 8,
+                    output_tokens: 0,
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    reasoning_tokens: None,
+                },
+            })
+        }
+    }
+
+    fn test_infer_request() -> InferRequest {
+        use layer0::context::{Message, Role};
+        InferRequest::new(vec![Message::new(
+            Role::User,
+            layer0::content::Content::text("hello"),
+        )])
+        .with_model("gpt-4o")
+        .with_max_tokens(512)
+    }
+
+    fn test_embed_request() -> EmbedRequest {
+        EmbedRequest::new(vec!["hello world".into()]).with_model("text-embedding-3-small")
+    }
+
+    #[tokio::test]
+    async fn otel_infer_mw_passes_through() {
+        let mw = OtelInferMiddleware::new("test-service");
+        let next = EchoInferNext;
+
+        let result = mw.infer(test_infer_request(), &next).await.unwrap();
+        assert_eq!(result.content.as_text().unwrap(), "echo");
+        assert_eq!(result.model, "test-model");
+        assert_eq!(result.usage.input_tokens, 10);
+        assert_eq!(result.usage.output_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn otel_infer_mw_propagates_error() {
+        let mw = OtelInferMiddleware::new("test-service");
+        let next = FailInferNext;
+
+        let result = mw.infer(test_infer_request(), &next).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("test failure"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn otel_embed_mw_passes_through() {
+        let mw = OtelEmbedMiddleware::new("test-service");
+        let next = EchoEmbedNext;
+
+        let result = mw.embed(test_embed_request(), &next).await.unwrap();
+        assert_eq!(result.embeddings.len(), 1);
+        assert_eq!(result.model, "embed-model");
+        assert_eq!(result.usage.input_tokens, 8);
     }
 }
