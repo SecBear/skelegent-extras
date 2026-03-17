@@ -35,7 +35,7 @@ use layer0::operator::OperatorInput;
 use skg_turn::infer::{InferRequest, InferResponse};
 use skg_turn::infer_middleware::{InferMiddleware, InferNext};
 use skg_turn::provider::ProviderError;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Type alias for a dispatch policy function stored in [`DispatchApprovalGuard`].
 type DispatchPolicyFn =
@@ -90,7 +90,7 @@ pub enum PolicyDecision {
 ///     .build();
 /// ```
 pub struct DispatchApprovalGuard {
-    policy: DispatchPolicyFn,
+    pub(crate) policy: DispatchPolicyFn,
 }
 
 impl DispatchApprovalGuard {
@@ -274,6 +274,140 @@ impl InferMiddleware for InferApprovalGuard {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// APPROVAL LOGGER
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Trait for logging approval decisions.
+///
+/// Implement this to record audit trails for dispatch approval decisions.
+/// The logger receives the operator ID and the policy decision for every
+/// dispatch that passes through an [`AuditingDispatchGuard`].
+pub trait ApprovalLogger: Send + Sync {
+    /// Log a policy decision for the given operator.
+    fn log_decision(&self, operator_id: &str, decision: &PolicyDecision);
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// AUDITING DISPATCH GUARD
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// A dispatch guard that wraps a [`DispatchApprovalGuard`] and logs every
+/// policy decision through an [`ApprovalLogger`].
+///
+/// The auditing guard evaluates the inner guard's policy and logs the
+/// decision before proceeding or blocking the dispatch.
+pub struct AuditingDispatchGuard {
+    inner: DispatchApprovalGuard,
+    logger: Arc<dyn ApprovalLogger>,
+}
+
+impl AuditingDispatchGuard {
+    /// Create a new auditing guard wrapping the given guard and logger.
+    pub fn new(inner: DispatchApprovalGuard, logger: Arc<dyn ApprovalLogger>) -> Self {
+        Self { inner, logger }
+    }
+}
+
+impl std::fmt::Debug for AuditingDispatchGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuditingDispatchGuard").finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl DispatchMiddleware for AuditingDispatchGuard {
+    /// Evaluate the inner policy, log the decision, then proceed or block.
+    async fn dispatch(
+        &self,
+        ctx: &DispatchContext,
+        input: OperatorInput,
+        next: &dyn DispatchNext,
+    ) -> Result<DispatchHandle, OrchError> {
+        let decision = (self.inner.policy)(ctx, &input);
+        self.logger
+            .log_decision(&ctx.operator_id.to_string(), &decision);
+        match decision {
+            PolicyDecision::Allow => next.dispatch(ctx, input).await,
+            PolicyDecision::Deny(reason) => Err(OrchError::DispatchFailed(reason)),
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// DYNAMIC POLICY GUARD
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Type alias for the boxed policy function stored in [`DynamicPolicyGuard`].
+type DynDispatchPolicyFn =
+    Box<dyn Fn(&DispatchContext, &OperatorInput) -> PolicyDecision + Send + Sync>;
+
+/// A dispatch guard whose policy can be swapped at runtime.
+///
+/// The policy is stored behind an `Arc<RwLock<...>>` so that callers can
+/// replace it without rebuilding the middleware stack.
+///
+/// ```rust,ignore
+/// use skg_hook_approval::{DynamicPolicyGuard, PolicyDecision};
+/// use std::sync::Arc;
+///
+/// let guard = DynamicPolicyGuard::new(|_ctx, _input| PolicyDecision::Allow);
+/// // Later, swap to a stricter policy:
+/// guard.set_policy(|_ctx, _input| PolicyDecision::Deny("locked down".into()));
+/// ```
+pub struct DynamicPolicyGuard {
+    policy: Arc<RwLock<DynDispatchPolicyFn>>,
+}
+
+impl DynamicPolicyGuard {
+    /// Create a dynamic policy guard with an initial policy function.
+    pub fn new<F>(policy: F) -> Self
+    where
+        F: Fn(&DispatchContext, &OperatorInput) -> PolicyDecision + Send + Sync + 'static,
+    {
+        Self {
+            policy: Arc::new(RwLock::new(Box::new(policy))),
+        }
+    }
+
+    /// Replace the current policy with a new one.
+    ///
+    /// Takes effect immediately for all subsequent dispatches.
+    pub fn set_policy<F>(&self, policy: F)
+    where
+        F: Fn(&DispatchContext, &OperatorInput) -> PolicyDecision + Send + Sync + 'static,
+    {
+        let mut guard = self.policy.write().expect("policy lock poisoned");
+        *guard = Box::new(policy);
+    }
+}
+
+impl std::fmt::Debug for DynamicPolicyGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DynamicPolicyGuard").finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl DispatchMiddleware for DynamicPolicyGuard {
+    /// Read the current policy, evaluate it, then proceed or block.
+    async fn dispatch(
+        &self,
+        ctx: &DispatchContext,
+        input: OperatorInput,
+        next: &dyn DispatchNext,
+    ) -> Result<DispatchHandle, OrchError> {
+        let decision = {
+            let policy = self.policy.read().expect("policy lock poisoned");
+            (policy)(ctx, &input)
+        };
+        match decision {
+            PolicyDecision::Allow => next.dispatch(ctx, input).await,
+            PolicyDecision::Deny(reason) => Err(OrchError::DispatchFailed(reason)),
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // TESTS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -450,5 +584,99 @@ mod tests {
             result.is_ok(),
             "expected request without max_tokens to be allowed: {result:?}"
         );
+    }
+
+    // ── AuditingDispatchGuard tests ─────────────────────────────────────
+
+    use std::sync::Mutex;
+
+    /// Logger that records all decisions into a Vec for assertion.
+    struct RecordingLogger {
+        decisions: Mutex<Vec<(String, String)>>,
+    }
+
+    impl RecordingLogger {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                decisions: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn decisions(&self) -> Vec<(String, String)> {
+            self.decisions.lock().unwrap().clone()
+        }
+    }
+
+    impl ApprovalLogger for RecordingLogger {
+        fn log_decision(&self, operator_id: &str, decision: &PolicyDecision) {
+            let desc = match decision {
+                PolicyDecision::Allow => "allow".to_owned(),
+                PolicyDecision::Deny(reason) => format!("deny: {reason}"),
+            };
+            self.decisions
+                .lock()
+                .unwrap()
+                .push((operator_id.to_owned(), desc));
+        }
+    }
+
+    #[tokio::test]
+    async fn auditing_guard_logs_denial() {
+        let logger = RecordingLogger::new();
+        let inner =
+            DispatchApprovalGuard::new(|_ctx, _input| PolicyDecision::Deny("blocked".into()));
+        let guard = AuditingDispatchGuard::new(inner, logger.clone());
+
+        let ctx = test_ctx("my-op");
+        let result = guard.dispatch(&ctx, test_input(), &EchoNext).await;
+        assert!(result.is_err(), "expected denial");
+
+        let decisions = logger.decisions();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].0, "my-op");
+        assert!(
+            decisions[0].1.contains("deny"),
+            "expected deny in log: {:?}",
+            decisions[0].1
+        );
+    }
+
+    #[tokio::test]
+    async fn auditing_guard_logs_allow() {
+        let logger = RecordingLogger::new();
+        let inner = DispatchApprovalGuard::new(|_ctx, _input| PolicyDecision::Allow);
+        let guard = AuditingDispatchGuard::new(inner, logger.clone());
+
+        let ctx = test_ctx("my-op");
+        let result = guard.dispatch(&ctx, test_input(), &EchoNext).await;
+        assert!(result.is_ok(), "expected allow");
+
+        let decisions = logger.decisions();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].0, "my-op");
+        assert_eq!(decisions[0].1, "allow");
+    }
+
+    // ── DynamicPolicyGuard tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dynamic_policy_swaps_at_runtime() {
+        let guard = DynamicPolicyGuard::new(|_ctx, _input| PolicyDecision::Allow);
+
+        // Initially allows.
+        let ctx = test_ctx("op");
+        let result = guard.dispatch(&ctx, test_input(), &EchoNext).await;
+        assert!(result.is_ok(), "expected initial Allow");
+
+        // Swap to deny.
+        guard.set_policy(|_ctx, _input| PolicyDecision::Deny("locked".into()));
+        let result = guard.dispatch(&ctx, test_input(), &EchoNext).await;
+        assert!(result.is_err(), "expected Deny after swap");
+        assert!(result.unwrap_err().to_string().contains("locked"));
+
+        // Swap back to allow.
+        guard.set_policy(|_ctx, _input| PolicyDecision::Allow);
+        let result = guard.dispatch(&ctx, test_input(), &EchoNext).await;
+        assert!(result.is_ok(), "expected Allow after second swap");
     }
 }
