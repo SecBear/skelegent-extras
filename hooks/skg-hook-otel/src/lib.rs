@@ -229,12 +229,12 @@ impl DispatchMiddleware for OtelMiddleware {
 ///
 /// Before inference: starts a `gen_ai.chat` span and records request
 /// attributes (`gen_ai.operation.name`, `gen_ai.request.model`,
-/// `gen_ai.request.max_tokens`).
+/// `gen_ai.request.max_tokens`, `gen_ai.request.temperature`).
 ///
 /// After inference: records response attributes
 /// (`gen_ai.response.model`, `gen_ai.usage.input_tokens`,
-/// `gen_ai.usage.output_tokens`) on success, or sets an `Error` span
-/// status on failure.
+/// `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reason`) on
+/// success, or sets an `Error` span status on failure.
 pub struct OtelInferMiddleware {
     tracer_name: &'static str,
 }
@@ -273,6 +273,12 @@ impl InferMiddleware for OtelInferMiddleware {
                 max_tokens as i64,
             ));
         }
+        if let Some(temperature) = request.temperature {
+            span.set_attribute(KeyValue::new(
+                "gen_ai.request.temperature",
+                temperature,
+            ));
+        }
 
         let result = next.infer(request).await;
 
@@ -290,6 +296,10 @@ impl InferMiddleware for OtelInferMiddleware {
                     "gen_ai.usage.output_tokens",
                     response.usage.output_tokens as i64,
                 ));
+                span.set_attribute(KeyValue::new(
+                    "gen_ai.response.finish_reason",
+                    stop_reason_str(&response.stop_reason),
+                ));
                 span.set_status(Status::Ok);
             }
             Err(err) => {
@@ -301,6 +311,21 @@ impl InferMiddleware for OtelInferMiddleware {
 
         span.end();
         result
+    }
+}
+
+/// Format a [`StopReason`] as a string for OTel `gen_ai.response.finish_reason`.
+///
+/// Uses lowercase snake_case names matching the OTel semantic conventions:
+/// `"end_turn"`, `"tool_use"`, `"max_tokens"`, `"content_filter"`.
+fn stop_reason_str(reason: &skg_turn::types::StopReason) -> &'static str {
+    use skg_turn::types::StopReason;
+    match reason {
+        StopReason::EndTurn => "end_turn",
+        StopReason::ToolUse => "tool_use",
+        StopReason::MaxTokens => "max_tokens",
+        StopReason::ContentFilter => "content_filter",
+        _ => "unknown",
     }
 }
 
