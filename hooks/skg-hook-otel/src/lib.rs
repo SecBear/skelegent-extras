@@ -22,7 +22,7 @@
 //! ```
 
 use async_trait::async_trait;
-use layer0::dispatch::DispatchHandle;
+use layer0::dispatch::{DispatchEvent, DispatchHandle};
 use layer0::dispatch_context::{DispatchContext, TraceContext};
 use layer0::error::OrchError;
 use layer0::middleware::{DispatchMiddleware, DispatchNext};
@@ -149,6 +149,16 @@ impl DispatchMiddleware for OtelMiddleware {
         let new_trace = trace_context_from_span(span.span_context(), &ctx.trace);
         let modified_ctx = ctx.clone().with_trace(new_trace);
 
+        // Create a tracing span that mirrors the OTel span. Progress events
+        // emitted inside this span's scope become OTel span events when a
+        // tracing-opentelemetry subscriber is active.
+        let tracing_span = tracing::info_span!(
+            target: "skelegent.dispatch",
+            "dispatch",
+            operator_id = %ctx.operator_id,
+            dispatch_id = %ctx.dispatch_id,
+        );
+
         // Forward to next middleware/dispatcher.
         let result = next.dispatch(&modified_ctx, input).await;
 
@@ -189,7 +199,24 @@ impl DispatchMiddleware for OtelMiddleware {
         }
 
         span.end();
-        result
+
+        // Attach an intercept that bridges DispatchEvent::Progress to tracing
+        // events. The tracing_span is entered inside the closure so that
+        // progress events appear as span events on the dispatch span when
+        // a tracing-opentelemetry subscriber is active.
+        result.map(|handle| {
+            handle.intercept(move |event| {
+                if let DispatchEvent::Progress { content } = event {
+                    tracing_span.in_scope(|| {
+                        tracing::info!(
+                            target: "skelegent.dispatch.progress",
+                            message = %content.as_text().unwrap_or(""),
+                            "dispatch progress"
+                        );
+                    });
+                }
+            })
+        })
     }
 }
 
@@ -496,6 +523,67 @@ mod tests {
         let handle = mw.dispatch(&ctx, test_input(), &CtxCapture).await.unwrap();
         let output = handle.collect().await.unwrap();
         assert_eq!(output.message.as_text().unwrap(), "captured");
+    }
+
+    /// Mock next layer that emits progress events before completing.
+    struct ProgressNext;
+
+    #[async_trait]
+    impl DispatchNext for ProgressNext {
+        async fn dispatch(
+            &self,
+            _ctx: &DispatchContext,
+            _input: OperatorInput,
+        ) -> Result<DispatchHandle, OrchError> {
+            let output = OperatorOutput::new(Content::text("done"), ExitReason::Complete);
+            let (handle, sender) = DispatchHandle::channel(DispatchId::new("progress"));
+            tokio::spawn(async move {
+                let _ = sender
+                    .send(DispatchEvent::Progress {
+                        content: Content::text("step 1"),
+                    })
+                    .await;
+                let _ = sender
+                    .send(DispatchEvent::Progress {
+                        content: Content::text("step 2"),
+                    })
+                    .await;
+                let _ = sender.send(DispatchEvent::Completed { output }).await;
+            });
+            Ok(handle)
+        }
+    }
+
+    #[tokio::test]
+    async fn otel_mw_intercepts_progress_events() {
+        // Verify that OtelMiddleware attaches a progress intercept that is
+        // transparent to the consumer — progress events still flow through
+        // and the final output is correct.
+        let mw = OtelMiddleware::new("test-service");
+        let next = ProgressNext;
+        let ctx = test_ctx();
+
+        let handle = mw.dispatch(&ctx, test_input(), &next).await.unwrap();
+
+        // collect_all preserves intermediate events, proving the intercept
+        // forwards them transparently.
+        let collected = handle.collect_all().await.unwrap();
+        assert_eq!(collected.output.message.as_text().unwrap(), "done");
+        assert_eq!(
+            collected.events.len(),
+            2,
+            "expected 2 progress events to pass through the intercept"
+        );
+
+        // Verify the progress content is preserved.
+        for (i, event) in collected.events.iter().enumerate() {
+            if let DispatchEvent::Progress { content } = event {
+                let text = content.as_text().unwrap();
+                assert_eq!(text, format!("step {}", i + 1));
+            } else {
+                panic!("expected Progress event at index {i}");
+            }
+        }
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
