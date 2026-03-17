@@ -1015,4 +1015,198 @@ mod tests {
         let sim = cosine_similarity(&a, &b);
         assert!((sim - 0.0).abs() < 1e-9, "zero vector → 0.0, got {sim}");
     }
+
+    // ── Concurrency verification tests ────────────────────────────────────
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Dispatcher that sleeps for a configurable duration before completing.
+    /// Used to verify wall-clock parallelism.
+    struct SlowDispatcher {
+        delay: std::time::Duration,
+        output: OperatorOutput,
+    }
+
+    impl SlowDispatcher {
+        fn new(delay: std::time::Duration) -> Arc<Self> {
+            Arc::new(Self {
+                delay,
+                output: test_output("ok"),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Dispatcher for SlowDispatcher {
+        async fn dispatch(
+            &self,
+            ctx: &layer0::dispatch_context::DispatchContext,
+            _input: OperatorInput,
+        ) -> Result<DispatchHandle, OrchError> {
+            let dispatch_id = ctx.dispatch_id.clone();
+            let (handle, sender) = DispatchHandle::channel(dispatch_id);
+            let output = self.output.clone();
+            let delay = self.delay;
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = sender
+                    .send(DispatchEvent::Completed { output })
+                    .await;
+            });
+            Ok(handle)
+        }
+    }
+
+    /// Dispatcher that tracks how many dispatches are in-flight concurrently,
+    /// recording the high-water mark.
+    struct ConcurrencyTrackingDispatcher {
+        delay: std::time::Duration,
+        active: AtomicUsize,
+        max_concurrent: AtomicUsize,
+        output: OperatorOutput,
+    }
+
+    impl ConcurrencyTrackingDispatcher {
+        fn new(delay: std::time::Duration) -> Arc<Self> {
+            Arc::new(Self {
+                delay,
+                active: AtomicUsize::new(0),
+                max_concurrent: AtomicUsize::new(0),
+                output: test_output("tracked"),
+            })
+        }
+
+        fn max_concurrent(&self) -> usize {
+            self.max_concurrent.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Dispatcher for ConcurrencyTrackingDispatcher {
+        async fn dispatch(
+            &self,
+            ctx: &layer0::dispatch_context::DispatchContext,
+            _input: OperatorInput,
+        ) -> Result<DispatchHandle, OrchError> {
+            // Increment active count and update high-water mark.
+            let prev = self.active.fetch_add(1, Ordering::SeqCst);
+            let current = prev + 1;
+            self.max_concurrent
+                .fetch_max(current, Ordering::SeqCst);
+
+            let dispatch_id = ctx.dispatch_id.clone();
+            let (handle, sender) = DispatchHandle::channel(dispatch_id);
+            let output = self.output.clone();
+            let delay = self.delay;
+
+            // We need a raw pointer to decrement `active` after the sleep.
+            // Safety: the Arc that owns this dispatcher outlives all spawned
+            // tasks because EvalRunner holds the Arc until join_set drains.
+            let active_ptr = &self.active as *const AtomicUsize;
+            // SAFETY: The Arc<ConcurrencyTrackingDispatcher> is kept alive by the
+            // EvalRunner (which holds Arc<dyn Dispatcher>) for the entire duration
+            // of `run()`, including while it drains the JoinSet. Every spawned task
+            // completes before `run()` returns, so the AtomicUsize is guaranteed to
+            // be alive for the duration of every spawned task.
+            let active_ref = unsafe { &*active_ptr };
+
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                active_ref.fetch_sub(1, Ordering::SeqCst);
+                let _ = sender
+                    .send(DispatchEvent::Completed { output })
+                    .await;
+            });
+            Ok(handle)
+        }
+    }
+
+    fn make_cases(n: usize) -> Vec<EvalCase> {
+        use layer0::operator::TriggerType;
+        (0..n)
+            .map(|i| {
+                EvalCase::new(
+                    format!("case-{i}"),
+                    OperatorInput::new(Content::text("input"), TriggerType::Task),
+                    ExpectedOutput::ExactText("ok".into()),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn eval_runner_executes_concurrently_wall_clock() {
+        // 4 cases each sleeping 100ms, all running in parallel (concurrency=4).
+        // Sequential would take ≥400ms; parallel should complete well under 250ms.
+        let dispatcher = SlowDispatcher::new(std::time::Duration::from_millis(100));
+        let runner = EvalRunner::new(dispatcher, OperatorId::new("test-op"))
+            .with_concurrency(4);
+
+        let cases = make_cases(4);
+        let start = Instant::now();
+        let report = runner.run(cases).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(report.total_cases(), 4);
+        for case in &report.cases {
+            assert!(case.error.is_none(), "unexpected error: {:?}", case.error);
+        }
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "expected <250ms for 4 parallel 100ms tasks, got {}ms",
+            elapsed.as_millis(),
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_runner_respects_semaphore_bound() {
+        // 6 cases, concurrency=2, each sleeping 50ms.
+        // The tracking dispatcher records the high-water mark of in-flight
+        // dispatches — it must never exceed the configured concurrency.
+        let dispatcher =
+            ConcurrencyTrackingDispatcher::new(std::time::Duration::from_millis(50));
+        let dyn_dispatcher: Arc<dyn Dispatcher> = Arc::clone(&dispatcher) as _;
+        let runner = EvalRunner::new(dyn_dispatcher, OperatorId::new("test-op"))
+            .with_concurrency(2);
+
+        let cases = make_cases(6);
+        let report = runner.run(cases).await;
+
+        assert_eq!(report.total_cases(), 6);
+        for case in &report.cases {
+            assert!(case.error.is_none(), "unexpected error: {:?}", case.error);
+        }
+
+        let max = dispatcher.max_concurrent();
+        assert!(
+            max <= 2,
+            "max concurrent dispatches was {max}, expected ≤ 2",
+        );
+        // With 6 cases and concurrency=2 the max should actually reach 2.
+        assert!(
+            max == 2,
+            "expected max concurrent to reach 2, but got {max}",
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_runner_completes_all_cases_under_concurrency() {
+        // Verify that the JoinSet correctly collects results from many cases
+        // when concurrency is lower than the total case count. This exercises
+        // the "queue" path where later tasks must wait for a semaphore permit.
+        let dispatcher = MockDispatcher::returning("ok");
+        let runner = EvalRunner::new(dispatcher, OperatorId::new("test-op"))
+            .with_metric(ExactMatchMetric)
+            .with_concurrency(2);
+
+        let cases = make_cases(10);
+        let report = runner.run(cases).await;
+
+        assert_eq!(report.total_cases(), 10);
+        assert_eq!(report.perfect_cases(), 10);
+        assert!((report.mean_score("exact_match") - 1.0).abs() < f64::EPSILON);
+        for case in &report.cases {
+            assert!(case.error.is_none(), "unexpected error: {:?}", case.error);
+        }
+    }
 }
