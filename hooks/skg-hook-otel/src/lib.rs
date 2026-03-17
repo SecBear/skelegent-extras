@@ -354,6 +354,10 @@ impl EmbedMiddleware for OtelEmbedMiddleware {
         match &result {
             Ok(response) => {
                 span.set_attribute(KeyValue::new(
+                    "gen_ai.response.model",
+                    response.model.clone(),
+                ));
+                span.set_attribute(KeyValue::new(
                     "gen_ai.usage.input_tokens",
                     response.usage.input_tokens as i64,
                 ));

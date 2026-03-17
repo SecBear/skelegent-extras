@@ -83,6 +83,7 @@ struct CachedToken {
 /// [`start_device_auth`]: Self::start_device_auth
 /// [`poll_for_token`]: Self::poll_for_token
 /// [`AuthProvider`]: skg_auth::AuthProvider
+#[derive(Clone)]
 pub struct OAuthDeviceFlowProvider {
     config: OAuthConfig,
     http: reqwest::Client,
@@ -679,6 +680,29 @@ mod tests {
         assert_eq!(deserialized.token_url, config.token_url);
         assert_eq!(deserialized.scopes, config.scopes);
         assert_eq!(deserialized.audience, config.audience);
+    }
+
+    #[tokio::test]
+    async fn test_clone() {
+        let config = OAuthConfig {
+            client_id: "c".into(),
+            device_auth_url: "http://unused".into(),
+            token_url: "http://unused".into(),
+            scopes: vec!["openid".into()],
+            audience: None,
+        };
+        let provider = OAuthDeviceFlowProvider::new(config);
+        provider
+            .set_token("my-token".into(), None, Some(3600))
+            .await;
+
+        let cloned = provider.clone();
+
+        // Cloned provider should share the same token cache (Arc<RwLock>).
+        let token = cloned.provide(&AuthRequest::new()).await.unwrap();
+        token.with_bytes(|b| {
+            assert_eq!(b, b"my-token");
+        });
     }
 
     #[tokio::test]

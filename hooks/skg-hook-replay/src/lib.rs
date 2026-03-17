@@ -84,8 +84,18 @@ pub enum MatchStrategy {
     /// `context.operator_id` matches the live dispatch's operator ID.
     ByOperatorId,
 
-    /// Match by content hash of the payload.
+    /// Content-hash matching for replay.
     ///
-    /// Reserved for future use. Currently behaves as [`Sequential`](Self::Sequential).
+    /// Currently behaves as [`Sequential`](Self::Sequential) — matching by
+    /// content hash will be implemented in a future version.
+    ///
+    /// When implemented, this will allow replay entries to be matched by
+    /// their payload hash rather than position, enabling tolerance for
+    /// operation reordering between recording and replay.
+    ///
+    /// # Note
+    ///
+    /// This variant is preserved for forward compatibility. Removing it
+    /// would be a semver-breaking change.
     ByContentHash,
 }

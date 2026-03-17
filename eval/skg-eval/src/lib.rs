@@ -356,10 +356,25 @@ impl EvalRunner {
             let dispatcher = Arc::clone(&self.dispatcher);
             let operator_id = self.operator_id.clone();
             let metrics = self.metrics.clone();
+            let case_name = case.name.clone();
 
             join_set.spawn(async move {
                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
-                run_case(dispatcher, operator_id, metrics, case).await
+                // Spawn an inner task so that panics inside run_case are
+                // captured as a JoinError rather than poisoning the outer
+                // JoinSet task. This lets us preserve the case name.
+                let inner = tokio::spawn(
+                    run_case(dispatcher, operator_id, metrics, case),
+                );
+                match inner.await {
+                    Ok(result) => result,
+                    Err(e) => CaseResult {
+                        name: case_name,
+                        scores: HashMap::new(),
+                        duration_ms: 0,
+                        error: Some(format!("task panicked: {e}")),
+                    },
+                }
             });
         }
 
@@ -368,12 +383,13 @@ impl EvalRunner {
             match result {
                 Ok(case_result) => results.push(case_result),
                 Err(e) => {
-                    // A task panic — record it as an error result with an empty name.
+                    // Task aborted (e.g., runtime shutdown) — not a panic
+                    // inside the eval future (those are caught above).
                     results.push(CaseResult {
-                        name: "<panicked>".into(),
+                        name: "<aborted>".into(),
                         scores: HashMap::new(),
                         duration_ms: 0,
-                        error: Some(format!("task panicked: {e}")),
+                        error: Some(format!("task aborted: {e}")),
                     });
                 }
             }
@@ -585,39 +601,69 @@ impl EvalMetric for LlmJudgeMetric {
 }
 
 /// Extract the first floating-point number from a string.
-/// Returns 0.0 if none is found.
+///
+/// Handles plain integers, decimal floats, negative numbers (`-0.5`),
+/// and scientific notation (`1e-2`, `3.5E+10`). Returns 0.0 if no
+/// number is found.
 fn parse_first_float(text: &str) -> f64 {
-    let mut start = None;
-    let mut has_dot = false;
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
 
-    for (i, ch) in text.char_indices() {
-        match ch {
-            '0'..='9' => {
-                if start.is_none() {
-                    start = Some(i);
-                }
+    while i < len {
+        // A number can start with an optional minus sign followed by a digit,
+        // or directly with a digit.
+        let start = i;
+        let mut j = i;
+
+        // Optional leading minus — only counts if followed by a digit or dot-digit.
+        if j < len && bytes[j] == b'-' {
+            j += 1;
+        }
+
+        // Must have at least one digit (or a dot followed by a digit).
+        let has_leading_digit = j < len && bytes[j].is_ascii_digit();
+        let has_dot_digit =
+            j < len && bytes[j] == b'.' && j + 1 < len && bytes[j + 1].is_ascii_digit();
+
+        if !has_leading_digit && !has_dot_digit {
+            i += 1;
+            continue;
+        }
+
+        // Consume integer part.
+        while j < len && bytes[j].is_ascii_digit() {
+            j += 1;
+        }
+
+        // Optional fractional part.
+        if j < len && bytes[j] == b'.' {
+            j += 1;
+            while j < len && bytes[j].is_ascii_digit() {
+                j += 1;
             }
-            '.' if start.is_some() && !has_dot => {
-                has_dot = true;
+        }
+
+        // Optional exponent part (e/E followed by optional +/- and digits).
+        if j < len && (bytes[j] == b'e' || bytes[j] == b'E') {
+            let mut k = j + 1;
+            if k < len && (bytes[k] == b'+' || bytes[k] == b'-') {
+                k += 1;
             }
-            _ => {
-                if let Some(s) = start {
-                    let candidate = &text[s..i];
-                    if let Ok(v) = candidate.parse::<f64>() {
-                        return v;
-                    }
-                    start = None;
-                    has_dot = false;
+            if k < len && bytes[k].is_ascii_digit() {
+                j = k;
+                while j < len && bytes[j].is_ascii_digit() {
+                    j += 1;
                 }
             }
         }
-    }
 
-    // Check at end of string.
-    if let Some(s) = start {
-        if let Ok(v) = text[s..].parse::<f64>() {
+        let candidate = &text[start..j];
+        if let Ok(v) = candidate.parse::<f64>() {
             return v;
         }
+
+        i = j.max(i + 1);
     }
 
     0.0
@@ -717,15 +763,25 @@ impl EvalMetric for SemanticSimilarityMetric {
 
 /// Compute cosine similarity between two vectors.
 ///
-/// Returns 0.0 if either vector has zero magnitude (to avoid NaN).
+/// Returns 0.0 if:
+/// - The vectors have different lengths
+/// - Either vector has zero magnitude
+/// - The result would be NaN (e.g., due to NaN inputs)
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
     let dot: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| x as f64 * y as f64).sum();
     let norm_a: f64 = a.iter().map(|&x| (x as f64).powi(2)).sum::<f64>().sqrt();
     let norm_b: f64 = b.iter().map(|&x| (x as f64).powi(2)).sum::<f64>().sqrt();
     if norm_a == 0.0 || norm_b == 0.0 {
         return 0.0;
     }
-    dot / (norm_a * norm_b)
+    let result = dot / (norm_a * norm_b);
+    if result.is_nan() {
+        return 0.0;
+    }
+    result
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1014,6 +1070,82 @@ mod tests {
         let b = vec![1.0_f32, 1.0];
         let sim = cosine_similarity(&a, &b);
         assert!((sim - 0.0).abs() < 1e-9, "zero vector → 0.0, got {sim}");
+    }
+
+    #[test]
+    fn cosine_similarity_mismatched_lengths() {
+        let a = vec![1.0_f32, 0.0, 1.0];
+        let b = vec![1.0_f32, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 0.0).abs() < 1e-9, "mismatched lengths → 0.0, got {sim}");
+    }
+
+    #[test]
+    fn cosine_similarity_nan_input() {
+        let a = vec![f32::NAN, 1.0];
+        let b = vec![1.0_f32, 1.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 0.0).abs() < 1e-9, "NaN input → 0.0, got {sim}");
+    }
+
+    #[test]
+    fn cosine_similarity_empty_vectors() {
+        let a: Vec<f32> = vec![];
+        let b: Vec<f32> = vec![];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 0.0).abs() < 1e-9, "empty vectors → 0.0, got {sim}");
+    }
+
+    // ── parse_first_float tests ─────────────────────────────────────────
+
+    #[test]
+    fn parse_first_float_basic() {
+        assert!((parse_first_float("score: 0.85") - 0.85).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_first_float_integer() {
+        assert!((parse_first_float("answer is 42 ok") - 42.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_first_float_negative() {
+        assert!((parse_first_float("offset: -0.5 done") - (-0.5)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_first_float_negative_integer() {
+        assert!((parse_first_float("temp: -3 C") - (-3.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_first_float_scientific() {
+        assert!((parse_first_float("rate: 1e-2 per sec") - 0.01).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_first_float_scientific_upper() {
+        assert!((parse_first_float("big: 3.5E+10 units") - 3.5e10).abs() < 1e-2);
+    }
+
+    #[test]
+    fn parse_first_float_scientific_negative_base() {
+        assert!((parse_first_float("val=-2.5e3 end") - (-2500.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_first_float_no_number() {
+        assert!((parse_first_float("no numbers here") - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_first_float_empty() {
+        assert!((parse_first_float("") - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_first_float_leading_dot() {
+        assert!((parse_first_float("ratio .75 done") - 0.75).abs() < 1e-9);
     }
 
     // ── Concurrency verification tests ────────────────────────────────────

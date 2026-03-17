@@ -44,11 +44,19 @@ impl SseFrame {
 /// - Empty lines signal end of frame and return `Some(frame)`, resetting state.
 /// - All other lines are ignored per the SSE spec.
 ///
-/// # Not yet handled
+/// # Reconnection limitations
 ///
-/// - `retry:` fields are parsed but ignored — reconnection backoff is not implemented.
-/// - `id:` fields (last-event-id) are parsed but ignored — reconnection with
-///   `Last-Event-ID` header is not implemented. TODO: add reconnection support.
+/// The `retry:` field is parsed per the SSE specification but reconnection
+/// with exponential backoff is **not** implemented. The parsed value is
+/// discarded.
+///
+/// The `id:` field (Last-Event-ID) is parsed per the SSE specification but
+/// reconnection with the `Last-Event-ID` request header is **not**
+/// implemented. The parsed value is discarded.
+///
+/// Callers that need automatic reconnection must implement it externally by
+/// catching stream termination and re-invoking [`dispatch_streaming`] with
+/// appropriate backoff.
 ///
 /// Returns `Some(frame)` when an empty line terminates a non-empty frame,
 /// `None` otherwise.

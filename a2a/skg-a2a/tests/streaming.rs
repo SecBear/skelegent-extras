@@ -417,6 +417,94 @@ async fn streaming_rejected_round_trip() {
     }
 }
 
+/// Verify that progress events carry the expected content text through the
+/// full server-SSE-client round trip (status_update with non-terminal state
+/// maps to `DispatchEvent::Progress` with the message content preserved).
+#[tokio::test]
+async fn streaming_progress_content_round_trip() {
+    /// Dispatcher that emits progress with specific structured content.
+    struct DetailedProgressDispatcher;
+
+    #[async_trait]
+    impl Dispatcher for DetailedProgressDispatcher {
+        async fn dispatch(
+            &self,
+            _ctx: &DispatchContext,
+            _input: OperatorInput,
+        ) -> Result<DispatchHandle, OrchError> {
+            let (handle, sender) = DispatchHandle::channel(DispatchId::new("progress-content"));
+            tokio::spawn(async move {
+                let _ = sender
+                    .send(DispatchEvent::Progress {
+                        content: Content::text("analyzing input"),
+                    })
+                    .await;
+                let _ = sender
+                    .send(DispatchEvent::Progress {
+                        content: Content::text("generating response"),
+                    })
+                    .await;
+                let _ = sender
+                    .send(DispatchEvent::Progress {
+                        content: Content::text("finalizing"),
+                    })
+                    .await;
+                let _ = sender
+                    .send(DispatchEvent::Completed {
+                        output: OperatorOutput::new(
+                            Content::text("result"),
+                            ExitReason::Complete,
+                        ),
+                    })
+                    .await;
+            });
+            Ok(handle)
+        }
+    }
+
+    let dispatcher: Arc<dyn Dispatcher> = Arc::new(DetailedProgressDispatcher);
+    let (addr, _card) = start_streaming_server(dispatcher).await;
+
+    let http = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+    let input = OperatorInput::new(
+        Content::text("test progress"),
+        layer0::operator::TriggerType::User,
+    );
+
+    let mut handle = dispatch_streaming(&http, &url, input)
+        .await
+        .expect("dispatch_streaming failed");
+
+    // Collect all events.
+    let mut progress_texts: Vec<String> = Vec::new();
+    let mut completed = false;
+
+    while let Some(event) = handle.recv().await {
+        match &event {
+            DispatchEvent::Progress { content } => {
+                progress_texts.push(content.as_text().unwrap_or("").to_owned());
+            }
+            DispatchEvent::Completed { output } => {
+                assert_eq!(output.message.as_text().unwrap(), "result");
+                completed = true;
+                break;
+            }
+            DispatchEvent::Failed { error } => {
+                panic!("unexpected failure: {error}");
+            }
+            _ => {}
+        }
+    }
+
+    assert!(completed, "never received Completed event");
+    assert_eq!(
+        progress_texts,
+        vec!["analyzing input", "generating response", "finalizing"],
+        "progress content text did not round-trip correctly"
+    );
+}
+
 /// `dispatch_auto` uses streaming when the card advertises it.
 #[tokio::test]
 async fn dispatch_auto_uses_streaming_when_available() {
