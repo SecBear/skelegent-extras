@@ -8,7 +8,7 @@ use layer0::error::OrchError;
 use layer0::id::DispatchId;
 use layer0::operator::{OperatorInput, OperatorOutput};
 use skg_hook_recorder::{Boundary, Phase, RecordEntry, SCHEMA_VERSION};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // REPLAY DISPATCHER
@@ -34,7 +34,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// ```
 pub struct ReplayDispatcher {
     recordings: Vec<RecordEntry>,
-    index: AtomicUsize,
+    /// Sequential index — used only by [`MatchStrategy::Sequential`] and [`MatchStrategy::ByContentHash`].
+    sequential_index: AtomicUsize,
+    /// Per-entry consumed flags — used only by [`MatchStrategy::ByOperatorId`].
+    consumed: Vec<AtomicBool>,
     strategy: MatchStrategy,
 }
 
@@ -57,13 +60,15 @@ impl ReplayDispatcher {
                 });
             }
         }
-        let recordings = recordings
+        let recordings: Vec<RecordEntry> = recordings
             .into_iter()
             .filter(|e| e.boundary == Boundary::Dispatch && e.phase == Phase::Post)
             .collect();
+        let consumed = recordings.iter().map(|_| AtomicBool::new(false)).collect();
         Ok(Self {
             recordings,
-            index: AtomicUsize::new(0),
+            sequential_index: AtomicUsize::new(0),
+            consumed,
             strategy: MatchStrategy::Sequential,
         })
     }
@@ -76,14 +81,22 @@ impl ReplayDispatcher {
 
     /// Find the next recording to use for the given dispatch context.
     ///
+    /// For [`MatchStrategy::Sequential`] and [`MatchStrategy::ByContentHash`]:
+    /// uses the sequential index to find the next entry in order.
+    ///
+    /// For [`MatchStrategy::ByOperatorId`]: scans ALL entries (not just those
+    /// after the current position), skips already-consumed entries, and returns
+    /// the first unconsumed entry whose `operator_id` matches. This allows
+    /// entries to be consumed out of order.
+    ///
     /// Returns `(position, &RecordEntry)` or a [`ReplayError`].
     fn find_recording(
         &self,
         ctx: &DispatchContext,
-        position: usize,
     ) -> Result<(usize, &RecordEntry), ReplayError> {
         match &self.strategy {
             MatchStrategy::Sequential | MatchStrategy::ByContentHash => {
+                let position = self.sequential_index.fetch_add(1, Ordering::SeqCst);
                 let entry = self
                     .recordings
                     .get(position)
@@ -92,14 +105,25 @@ impl ReplayDispatcher {
             }
             MatchStrategy::ByOperatorId => {
                 let op_id = ctx.operator_id.to_string();
-                let entry = self
+                // Scan all entries, find first unconsumed match.
+                let found = self
                     .recordings
                     .iter()
+                    .zip(self.consumed.iter())
                     .enumerate()
-                    .skip(position)
-                    .find(|(_, e)| e.context.operator_id == op_id)
-                    .ok_or(ReplayError::RecordingExhausted { position })?;
-                Ok(entry)
+                    .find(|(_, (e, consumed))| {
+                        !consumed.load(Ordering::SeqCst) && e.context.operator_id == op_id
+                    });
+                match found {
+                    Some((idx, _)) => {
+                        // Mark as consumed before returning.
+                        self.consumed[idx].store(true, Ordering::SeqCst);
+                        Ok((idx, &self.recordings[idx]))
+                    }
+                    None => Err(ReplayError::RecordingExhausted {
+                        position: self.sequential_index.load(Ordering::SeqCst),
+                    }),
+                }
             }
         }
     }
@@ -112,10 +136,8 @@ impl layer0::Dispatcher for ReplayDispatcher {
         ctx: &DispatchContext,
         _input: OperatorInput,
     ) -> Result<DispatchHandle, OrchError> {
-        let position = self.index.fetch_add(1, Ordering::SeqCst);
-
         let (_, entry) = self
-            .find_recording(ctx, position)
+            .find_recording(ctx)
             .map_err(|e| OrchError::DispatchFailed(e.to_string()))?;
 
         // If the recording captured an error, replay it.
@@ -309,5 +331,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.message.as_text(), Some("real"));
+    }
+
+    #[tokio::test]
+    async fn replay_dispatch_by_operator_id() {
+        // Three entries with different operator_ids — consume out of order.
+        let entries = vec![
+            make_dispatch_post_entry("op-a", "d-a", &make_output("alpha")),
+            make_dispatch_post_entry("op-b", "d-b", &make_output("beta")),
+            make_dispatch_post_entry("op-c", "d-c", &make_output("gamma")),
+        ];
+
+        let dispatcher = ReplayDispatcher::new(entries)
+            .unwrap()
+            .with_strategy(MatchStrategy::ByOperatorId);
+
+        // Consume op-c first (index 2), then op-a (index 0), then op-b (index 1).
+        let out_c = dispatcher
+            .dispatch(&make_ctx("op-c"), make_input())
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(out_c.message.as_text(), Some("gamma"));
+
+        let out_a = dispatcher
+            .dispatch(&make_ctx("op-a"), make_input())
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(out_a.message.as_text(), Some("alpha"));
+
+        let out_b = dispatcher
+            .dispatch(&make_ctx("op-b"), make_input())
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(out_b.message.as_text(), Some("beta"));
+
+        // All consumed — next call for any op should be exhausted.
+        let err = dispatcher
+            .dispatch(&make_ctx("op-a"), make_input())
+            .await
+            .expect_err("should be exhausted");
+        assert!(
+            err.to_string().contains("exhausted"),
+            "unexpected error: {err}"
+        );
     }
 }

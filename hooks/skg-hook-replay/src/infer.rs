@@ -6,7 +6,7 @@ use skg_turn::embedding::{EmbedRequest, EmbedResponse};
 use skg_turn::infer::{InferRequest, InferResponse};
 use skg_turn::provider::{Provider, ProviderError};
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // REPLAY PROVIDER
@@ -36,8 +36,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub struct ReplayProvider {
     infer_recordings: Vec<RecordEntry>,
     embed_recordings: Vec<RecordEntry>,
-    infer_index: AtomicUsize,
-    embed_index: AtomicUsize,
+    /// Per-entry consumed flags for infer recordings.
+    infer_consumed: Vec<AtomicBool>,
+    /// Per-entry consumed flags for embed recordings.
+    embed_consumed: Vec<AtomicBool>,
 }
 
 impl ReplayProvider {
@@ -70,11 +72,13 @@ impl ReplayProvider {
                 }
             }
         }
+        let infer_consumed = infer_recordings.iter().map(|_| AtomicBool::new(false)).collect();
+        let embed_consumed = embed_recordings.iter().map(|_| AtomicBool::new(false)).collect();
         Ok(Self {
             infer_recordings,
             embed_recordings,
-            infer_index: AtomicUsize::new(0),
-            embed_index: AtomicUsize::new(0),
+            infer_consumed,
+            embed_consumed,
         })
     }
 }
@@ -84,13 +88,23 @@ impl Provider for ReplayProvider {
         &self,
         _request: InferRequest,
     ) -> impl Future<Output = Result<InferResponse, ProviderError>> + Send {
-        let position = self.infer_index.fetch_add(1, Ordering::SeqCst);
-        let result = match self.infer_recordings.get(position) {
-            None => Err(ProviderError::InvalidRequest {
-                message: ReplayError::RecordingExhausted { position }.to_string(),
-                status: None,
-            }),
-            Some(entry) => {
+        // Find the first unconsumed infer recording and mark it consumed.
+        let found = self
+            .infer_consumed
+            .iter()
+            .enumerate()
+            .find(|(_, c)| !c.load(Ordering::SeqCst));
+        let result = match found {
+            None => {
+                let position = self.infer_consumed.len();
+                Err(ProviderError::InvalidRequest {
+                    message: ReplayError::RecordingExhausted { position }.to_string(),
+                    status: None,
+                })
+            }
+            Some((idx, flag)) => {
+                flag.store(true, Ordering::SeqCst);
+                let entry = &self.infer_recordings[idx];
                 if let Some(ref msg) = entry.error {
                     Err(ProviderError::InvalidRequest {
                         message: msg.clone(),
@@ -98,9 +112,11 @@ impl Provider for ReplayProvider {
                     })
                 } else {
                     serde_json::from_value::<InferResponse>(entry.payload_json.clone())
-                        .map_err(|e| ProviderError::InvalidResponse(
-                            ReplayError::PayloadError(e.to_string()).to_string(),
-                        ))
+                        .map_err(|e| {
+                            ProviderError::InvalidResponse(
+                                ReplayError::PayloadError(e.to_string()).to_string(),
+                            )
+                        })
                 }
             }
         };
@@ -111,13 +127,23 @@ impl Provider for ReplayProvider {
         &self,
         _request: EmbedRequest,
     ) -> impl Future<Output = Result<EmbedResponse, ProviderError>> + Send {
-        let position = self.embed_index.fetch_add(1, Ordering::SeqCst);
-        let result = match self.embed_recordings.get(position) {
-            None => Err(ProviderError::InvalidRequest {
-                message: ReplayError::RecordingExhausted { position }.to_string(),
-                status: None,
-            }),
-            Some(entry) => {
+        // Find the first unconsumed embed recording and mark it consumed.
+        let found = self
+            .embed_consumed
+            .iter()
+            .enumerate()
+            .find(|(_, c)| !c.load(Ordering::SeqCst));
+        let result = match found {
+            None => {
+                let position = self.embed_consumed.len();
+                Err(ProviderError::InvalidRequest {
+                    message: ReplayError::RecordingExhausted { position }.to_string(),
+                    status: None,
+                })
+            }
+            Some((idx, flag)) => {
+                flag.store(true, Ordering::SeqCst);
+                let entry = &self.embed_recordings[idx];
                 if let Some(ref msg) = entry.error {
                     Err(ProviderError::InvalidRequest {
                         message: msg.clone(),
@@ -125,9 +151,11 @@ impl Provider for ReplayProvider {
                     })
                 } else {
                     serde_json::from_value::<EmbedResponse>(entry.payload_json.clone())
-                        .map_err(|e| ProviderError::InvalidResponse(
-                            ReplayError::PayloadError(e.to_string()).to_string(),
-                        ))
+                        .map_err(|e| {
+                            ProviderError::InvalidResponse(
+                                ReplayError::PayloadError(e.to_string()).to_string(),
+                            )
+                        })
                 }
             }
         };
