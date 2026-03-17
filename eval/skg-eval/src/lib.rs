@@ -23,8 +23,9 @@ use skg_provider_router::DynProvider;
 use skg_turn::embedding::EmbedRequest;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // CORE TYPES
@@ -520,10 +521,16 @@ async fn run_case(
 /// It receives a prompt containing the rubric, expected output, and actual
 /// output, and should respond with a float between 0.0 and 1.0 followed by
 /// an explanation.
+///
+/// A configurable [`timeout`](Self::timeout) (default 30 seconds) prevents
+/// judge calls from blocking indefinitely. On timeout the metric returns a
+/// score of 0.0 with explanation "judge timed out".
 pub struct LlmJudgeMetric {
     dispatcher: Arc<dyn Dispatcher>,
     judge_operator: OperatorId,
     rubric: String,
+    /// Maximum wall-clock time to wait for the judge to respond.
+    timeout: Duration,
 }
 
 impl LlmJudgeMetric {
@@ -532,6 +539,8 @@ impl LlmJudgeMetric {
     /// - `dispatcher` — used to invoke the judge operator.
     /// - `judge_operator` — the operator ID of the LLM judge.
     /// - `rubric` — evaluation criteria shown to the judge.
+    ///
+    /// Default timeout is 30 seconds. Override with [`with_timeout`](Self::with_timeout).
     pub fn new(
         dispatcher: Arc<dyn Dispatcher>,
         judge_operator: OperatorId,
@@ -541,7 +550,14 @@ impl LlmJudgeMetric {
             dispatcher,
             judge_operator,
             rubric: rubric.into(),
+            timeout: Duration::from_secs(30),
         }
+    }
+
+    /// Set the maximum time to wait for the judge to respond.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 }
 
@@ -576,18 +592,23 @@ impl EvalMetric for LlmJudgeMetric {
             self.judge_operator.clone(),
         );
 
-        let handle = match self.dispatcher.dispatch(&ctx, input).await {
-            Ok(h) => h,
-            Err(e) => {
-                return Score::with_explanation(0.0, format!("judge dispatch failed: {e}"));
-            }
+        // Wrap the entire judge call in a timeout.
+        let judge_future = async {
+            let handle = self.dispatcher.dispatch(&ctx, input).await
+                .map_err(|e| format!("judge dispatch failed: {e}"))?;
+            let judge_output = handle.collect().await
+                .map_err(|e| format!("judge collect failed: {e}"))?;
+            Ok::<_, String>(judge_output)
         };
 
-        let judge_output = match handle.collect().await {
-            Ok(o) => o,
-            Err(e) => {
-                return Score::with_explanation(0.0, format!("judge collect failed: {e}"));
+        let judge_output = match tokio::time::timeout(self.timeout, judge_future).await {
+            Err(_elapsed) => {
+                return Score::with_explanation(0.0, "judge timed out");
             }
+            Ok(Err(e)) => {
+                return Score::with_explanation(0.0, e);
+            }
+            Ok(Ok(o)) => o,
         };
 
         let response_text = judge_output.message.as_text().unwrap_or_default();
@@ -677,10 +698,17 @@ fn parse_first_float(text: &str) -> f64 {
 ///
 /// Requires a [`DynProvider`] that supports the `embed` operation. The score
 /// equals the cosine similarity (clamped to [0.0, 1.0]).
+///
+/// An internal embedding cache avoids re-embedding identical texts across
+/// multiple evaluation cases. The cache is keyed by the raw input string and
+/// stores the embedding vector.
 pub struct SemanticSimilarityMetric {
     provider: Arc<dyn DynProvider>,
     model: String,
     threshold: f64,
+    /// Cache: text -> embedding vector. Avoids redundant embed calls for
+    /// repeated strings across evaluation cases.
+    cache: Arc<Mutex<HashMap<String, Vec<f32>>>>,
 }
 
 impl SemanticSimilarityMetric {
@@ -694,6 +722,7 @@ impl SemanticSimilarityMetric {
             provider,
             model: model.into(),
             threshold: 0.8,
+            cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -706,6 +735,38 @@ impl SemanticSimilarityMetric {
     /// Return the configured similarity threshold.
     pub fn threshold(&self) -> f64 {
         self.threshold
+    }
+
+    /// Embed a single text, using the cache when possible.
+    ///
+    /// Returns the embedding vector on success, or a provider error description.
+    async fn embed_cached(&self, text: &str) -> Result<Vec<f32>, String> {
+        // Check cache first.
+        {
+            let cache = self.cache.lock().await;
+            if let Some(vec) = cache.get(text) {
+                return Ok(vec.clone());
+            }
+        }
+
+        // Not cached — call provider.
+        let request = EmbedRequest::new(vec![text.to_owned()]).with_model(&self.model);
+        let response = self.provider.embed_boxed(request).await.map_err(|e| format!("embed failed: {e}"))?;
+
+        let vec = response
+            .embeddings
+            .into_iter()
+            .next()
+            .map(|e| e.vector)
+            .ok_or_else(|| "embed returned no embeddings".to_owned())?;
+
+        // Store in cache.
+        {
+            let mut cache = self.cache.lock().await;
+            cache.insert(text.to_owned(), vec.clone());
+        }
+
+        Ok(vec)
     }
 }
 
@@ -729,26 +790,16 @@ impl EvalMetric for SemanticSimilarityMetric {
         };
         let actual_text = output.message.as_text().unwrap_or_default().to_owned();
 
-        let request = EmbedRequest::new(vec![expected_text.clone(), actual_text.clone()])
-            .with_model(&self.model);
-
-        let embed_response = match self.provider.embed_boxed(request).await {
-            Ok(r) => r,
-            Err(e) => {
-                return Score::with_explanation(0.0, format!("embed failed: {e}"));
-            }
+        let a = match self.embed_cached(&expected_text).await {
+            Ok(v) => v,
+            Err(e) => return Score::with_explanation(0.0, e),
+        };
+        let b = match self.embed_cached(&actual_text).await {
+            Ok(v) => v,
+            Err(e) => return Score::with_explanation(0.0, e),
         };
 
-        if embed_response.embeddings.len() < 2 {
-            return Score::with_explanation(
-                0.0,
-                "embed returned fewer than 2 embeddings",
-            );
-        }
-
-        let a = &embed_response.embeddings[0].vector;
-        let b = &embed_response.embeddings[1].vector;
-        let similarity = cosine_similarity(a, b);
+        let similarity = cosine_similarity(&a, &b);
         let clamped = similarity.clamp(0.0, 1.0);
 
         Score::with_explanation(
@@ -1340,5 +1391,138 @@ mod tests {
         for case in &report.cases {
             assert!(case.error.is_none(), "unexpected error: {:?}", case.error);
         }
+    }
+
+    // ── LlmJudgeMetric timeout test ─────────────────────────────────────
+
+    /// Dispatcher that sleeps forever — used to test timeout behavior.
+    struct ForeverDispatcher;
+
+    #[async_trait]
+    impl Dispatcher for ForeverDispatcher {
+        async fn dispatch(
+            &self,
+            ctx: &layer0::dispatch_context::DispatchContext,
+            _input: OperatorInput,
+        ) -> Result<DispatchHandle, OrchError> {
+            let dispatch_id = ctx.dispatch_id.clone();
+            let (handle, sender) = DispatchHandle::channel(dispatch_id);
+            tokio::spawn(async move {
+                // Sleep forever — the timeout should fire first.
+                tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
+                let output =
+                    OperatorOutput::new(Content::text("never"), layer0::operator::ExitReason::Complete);
+                let _ = sender.send(DispatchEvent::Completed { output }).await;
+            });
+            Ok(handle)
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_judge_returns_zero_on_timeout() {
+        let dispatcher: Arc<dyn Dispatcher> = Arc::new(ForeverDispatcher);
+        let metric = LlmJudgeMetric::new(
+            dispatcher,
+            OperatorId::new("judge"),
+            "test rubric",
+        )
+        .with_timeout(std::time::Duration::from_millis(50));
+
+        let output = test_output("actual answer");
+        let expected = ExpectedOutput::ExactText("expected answer".into());
+        let score = metric.score(&output, &expected).await;
+
+        assert!(
+            (score.value - 0.0).abs() < f64::EPSILON,
+            "expected 0.0 on timeout, got {}",
+            score.value
+        );
+        assert_eq!(
+            score.explanation.as_deref(),
+            Some("judge timed out"),
+            "expected 'judge timed out' explanation, got {:?}",
+            score.explanation
+        );
+    }
+
+    // ── SemanticSimilarityMetric cache test ──────────────────────────────
+
+    use std::sync::atomic::AtomicU32;
+    use skg_turn::embedding::{EmbedRequest as TurnEmbedRequest, EmbedResponse as TurnEmbedResponse, Embedding};
+    use skg_turn::infer::{InferRequest as TurnInferRequest, InferResponse as TurnInferResponse};
+    use skg_turn::provider::ProviderError;
+    use skg_turn::types::TokenUsage;
+
+    /// Provider that counts how many times `embed` is called.
+    struct CountingEmbedProvider {
+        call_count: AtomicU32,
+    }
+
+    impl CountingEmbedProvider {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                call_count: AtomicU32::new(0),
+            })
+        }
+
+        fn count(&self) -> u32 {
+            self.call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl skg_turn::provider::Provider for CountingEmbedProvider {
+        fn infer(
+            &self,
+            _request: TurnInferRequest,
+        ) -> impl std::future::Future<Output = Result<TurnInferResponse, ProviderError>> + Send {
+            std::future::ready(Err(ProviderError::Other("not implemented".into())))
+        }
+
+        fn embed(
+            &self,
+            request: TurnEmbedRequest,
+        ) -> impl std::future::Future<Output = Result<TurnEmbedResponse, ProviderError>> + Send {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let embeddings = request
+                .texts
+                .iter()
+                .map(|_| Embedding {
+                    vector: vec![0.1, 0.2, 0.3],
+                })
+                .collect();
+            std::future::ready(Ok(TurnEmbedResponse {
+                embeddings,
+                model: "test".into(),
+                usage: TokenUsage::default(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_similarity_cache_avoids_redundant_embeds() {
+        let provider = CountingEmbedProvider::new();
+        let dyn_provider: Arc<dyn DynProvider> = provider.clone();
+        let metric = SemanticSimilarityMetric::new(dyn_provider, "test-model");
+
+        let output = test_output("hello world");
+        let expected = ExpectedOutput::ExactText("hello world".into());
+
+        // First call: should embed both texts.
+        let _s1 = metric.score(&output, &expected).await;
+        let count_after_first = provider.count();
+        // Both texts are "hello world" — identical, so the second embed should
+        // hit cache. That means only 1 provider call (for the first text).
+        assert_eq!(
+            count_after_first, 1,
+            "expected 1 provider embed call (second should hit cache), got {count_after_first}"
+        );
+
+        // Second call with same texts: should hit cache for both.
+        let _s2 = metric.score(&output, &expected).await;
+        let count_after_second = provider.count();
+        assert_eq!(
+            count_after_second, 1,
+            "expected still 1 total provider embed calls (all cached), got {count_after_second}"
+        );
     }
 }
