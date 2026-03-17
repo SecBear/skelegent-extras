@@ -58,8 +58,15 @@ pub enum ReplayError {
     },
 
     /// Failed to deserialize the recorded payload.
-    #[error("payload error: {0}")]
-    PayloadError(String),
+    #[error("payload error at position {position}: {context} ({cause})")]
+    PayloadError {
+        /// Human-readable description of what was being deserialized.
+        context: String,
+        /// Underlying error message from the deserializer.
+        cause: String,
+        /// Position in the recording sequence where the error occurred.
+        position: usize,
+    },
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -136,7 +136,7 @@ impl layer0::Dispatcher for ReplayDispatcher {
         ctx: &DispatchContext,
         _input: OperatorInput,
     ) -> Result<DispatchHandle, OrchError> {
-        let (_, entry) = self
+        let (position, entry) = self
             .find_recording(ctx)
             .map_err(|e| OrchError::DispatchFailed(e.to_string()))?;
 
@@ -149,7 +149,12 @@ impl layer0::Dispatcher for ReplayDispatcher {
         let output: OperatorOutput = serde_json::from_value(entry.payload_json.clone())
             .map_err(|e| {
                 OrchError::DispatchFailed(
-                    ReplayError::PayloadError(e.to_string()).to_string(),
+                    ReplayError::PayloadError {
+                        context: "deserialize OperatorOutput".into(),
+                        cause: e.to_string(),
+                        position,
+                    }
+                    .to_string(),
                 )
             })?;
 

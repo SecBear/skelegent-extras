@@ -114,7 +114,12 @@ impl Provider for ReplayProvider {
                     serde_json::from_value::<InferResponse>(entry.payload_json.clone())
                         .map_err(|e| {
                             ProviderError::InvalidResponse(
-                                ReplayError::PayloadError(e.to_string()).to_string(),
+                                ReplayError::PayloadError {
+                                    context: "deserialize InferResponse".into(),
+                                    cause: e.to_string(),
+                                    position: idx,
+                                }
+                                .to_string(),
                             )
                         })
                 }
@@ -153,7 +158,12 @@ impl Provider for ReplayProvider {
                     serde_json::from_value::<EmbedResponse>(entry.payload_json.clone())
                         .map_err(|e| {
                             ProviderError::InvalidResponse(
-                                ReplayError::PayloadError(e.to_string()).to_string(),
+                                ReplayError::PayloadError {
+                                    context: "deserialize EmbedResponse".into(),
+                                    cause: e.to_string(),
+                                    position: idx,
+                                }
+                                .to_string(),
                             )
                         })
                 }
