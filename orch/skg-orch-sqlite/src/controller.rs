@@ -303,8 +303,8 @@ impl SqliteDurableOrchestrator {
         }
 
         if let Err(error) = self.store.take_resume(run_id, wait_point).await {
-            eprintln!(
-                "warning: sqlite durable orchestrator left a stale pending resume after resolving the wait for run {} wait point {}: {}",
+            tracing::warn!(
+                "sqlite durable orchestrator left a stale pending resume after resolving the wait for run {} wait point {}: {}",
                 run_id, wait_point, error
             );
         }
@@ -633,13 +633,12 @@ mod tests {
     use super::*;
     use layer0::{Content, DispatchContext, Effect, ExitReason, OperatorError, OperatorInput, OperatorOutput, Scope};
     use serde_json::json;
-    use layer0::dispatch::EffectEmitter;
 
     struct UnsupportedEffectOnStartOperator;
 
     #[async_trait]
     impl Operator for UnsupportedEffectOnStartOperator {
-        async fn execute(&self, _input: OperatorInput, _ctx: &DispatchContext, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
+        async fn execute(&self, _input: OperatorInput, _ctx: &DispatchContext) -> Result<OperatorOutput, OperatorError> {
             let mut output =
                 OperatorOutput::new(Content::text("start should fail"), ExitReason::Complete);
             output.effects = vec![Effect::WriteMemory {
@@ -660,7 +659,7 @@ mod tests {
 
     #[async_trait]
     impl Operator for TimedWaitOnStartOperator {
-        async fn execute(&self, _input: OperatorInput, _ctx: &DispatchContext, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
+        async fn execute(&self, _input: OperatorInput, _ctx: &DispatchContext) -> Result<OperatorOutput, OperatorError> {
             Ok(OperatorOutput::new(
                 Content::text(
                     json!({

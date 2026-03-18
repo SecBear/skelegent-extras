@@ -119,6 +119,7 @@ impl SequencedExecNext {
 impl ExecNext for SequencedExecNext {
     async fn run(
         &self,
+        _ctx: &DispatchContext,
         _input: OperatorInput,
         _spec: &EnvironmentSpec,
     ) -> Result<OperatorOutput, EnvError> {
@@ -312,13 +313,14 @@ async fn exec_recorder_post_payload_non_null() {
     let spec = EnvironmentSpec::default();
 
     let mock_exec = SequencedExecNext::new(expected_outputs.clone());
+    let ctx = make_ctx("exec-test", "exec-round-trip");
 
     // Run 3 executions through the recorder.
     let mut live_outputs = Vec::new();
     for i in 0..3usize {
         let input = make_input(&format!("exec-input-{i}"));
         let output = recorder
-            .run(input, &spec, &mock_exec)
+            .run(&ctx, input, &spec, &mock_exec)
             .await
             .unwrap_or_else(|e| panic!("exec run {i} failed: {e}"));
         live_outputs.push(output);

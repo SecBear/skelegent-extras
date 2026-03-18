@@ -6,7 +6,6 @@
 
 use async_trait::async_trait;
 use layer0::operator::{Operator, OperatorInput};
-use layer0::dispatch::EffectEmitter;
 use layer0::{DispatchContext, OperatorId};
 use layer0::id::DispatchId;
 use std::collections::HashMap;
@@ -182,7 +181,7 @@ impl TemporalClient for MockTemporalClient {
         // ── 4. Execute (async; all locks released) ─────────────────────────
         let ctx = DispatchContext::new(DispatchId::new(activity_id), OperatorId::new(activity_id));
         let output = op
-            .execute(operator_input, &ctx, &EffectEmitter::noop())
+            .execute(operator_input, &ctx)
             .await
             .map_err(|e| TemporalError::Other(e.to_string()))?;
 

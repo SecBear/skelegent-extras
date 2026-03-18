@@ -15,7 +15,6 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use layer0::{Content, ExitReason, Operator, OperatorError, OperatorInput, OperatorOutput, DispatchContext};
-use layer0::dispatch::EffectEmitter;
 use tracing::{debug, info};
 
 use crate::provider::{ResearchInput, ResearchMode, ResearchResult, ResearchSource, SweepError};
@@ -37,7 +36,7 @@ impl<R: ResearchSource> ResearchOperator<R> {
 
 #[async_trait]
 impl<R: ResearchSource> Operator for ResearchOperator<R> {
-    async fn execute(&self, input: OperatorInput, _ctx: &DispatchContext, _emitter: &EffectEmitter) -> Result<OperatorOutput, OperatorError> {
+    async fn execute(&self, input: OperatorInput, _ctx: &DispatchContext) -> Result<OperatorOutput, OperatorError> {
         let text = input.message.as_text().unwrap_or("{}");
         let req: ResearchInput = serde_json::from_str(text).map_err(|e| {
             OperatorError::non_retryable(format!("ResearchOperator: invalid input: {e}"))
@@ -166,7 +165,7 @@ mod tests {
     #[tokio::test]
     async fn search_mode_returns_results() {
         let op = ResearchOperator::new(make_source(3));
-        let output = op.execute(make_input(ResearchMode::Search), &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.unwrap();
+        let output = op.execute(make_input(ResearchMode::Search), &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test"))).await.unwrap();
         let results: Vec<ResearchResult> =
             serde_json::from_str(output.message.as_text().unwrap()).unwrap();
         assert_eq!(results.len(), 3);
@@ -176,7 +175,7 @@ mod tests {
     #[tokio::test]
     async fn deep_mode_returns_results() {
         let op = ResearchOperator::new(make_source(5));
-        let output = op.execute(make_input(ResearchMode::Deep), &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.unwrap();
+        let output = op.execute(make_input(ResearchMode::Deep), &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test"))).await.unwrap();
         let results: Vec<ResearchResult> =
             serde_json::from_str(output.message.as_text().unwrap()).unwrap();
         assert_eq!(results.len(), 5);
@@ -186,14 +185,14 @@ mod tests {
     async fn invalid_input_returns_error() {
         let op = ResearchOperator::new(make_source(0));
         let input = OperatorInput::new(Content::text("not json"), TriggerType::Task);
-        let err = op.execute(input, &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.unwrap_err();
+        let err = op.execute(input, &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test"))).await.unwrap_err();
         assert!(err.to_string().contains("invalid input"));
     }
 
     #[tokio::test]
     async fn empty_results_ok() {
         let op = ResearchOperator::new(make_source(0));
-        let output = op.execute(make_input(ResearchMode::Search), &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test")), &EffectEmitter::noop()).await.unwrap();
+        let output = op.execute(make_input(ResearchMode::Search), &DispatchContext::new(DispatchId::new("test"), OperatorId::new("test"))).await.unwrap();
         let results: Vec<ResearchResult> =
             serde_json::from_str(output.message.as_text().unwrap()).unwrap();
         assert!(results.is_empty());

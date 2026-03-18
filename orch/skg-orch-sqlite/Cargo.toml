@@ -8,7 +8,7 @@ homepage.workspace = true
 description = "SQLite-backed durable orchestrator assembly for skelegent"
 
 [dependencies]
-layer0 = { path = "../../../skelegent/layer0", version = "0.4.0" }
+layer0 = { path = "../../../skelegent/layer0", version = "0.4.1" }
 skg-run-core = { path = "../../../skelegent/orch/skg-run-core", version = "0.4.1" }
 skg-run-sqlite = { path = "../../run/skg-run-sqlite", version = "0.1.0" }
 async-trait = "0.1"
@@ -16,6 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
+tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
