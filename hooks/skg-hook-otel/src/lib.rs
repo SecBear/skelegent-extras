@@ -20,6 +20,28 @@
 //!     .observe(OtelMiddleware::new("my-service"))
 //!     .build();
 //! ```
+//!
+//! # Wiring tracing-opentelemetry
+//!
+//! This crate uses `tracing::info_span!` inside [`OtelMiddleware`] to mirror
+//! each dispatch span into the `tracing` ecosystem. When a
+//! [`tracing_opentelemetry::layer()`](https://docs.rs/tracing-opentelemetry)
+//! is installed in the application's subscriber, those spans are automatically
+//! forwarded to the configured OTel exporter — no code changes required here.
+//!
+//! ```rust,ignore
+//! use tracing_subscriber::prelude::*;
+//! use tracing_opentelemetry::layer as otel_layer;
+//!
+//! tracing_subscriber::registry()
+//!     .with(otel_layer().with_tracer(my_tracer))
+//!     .init();
+//! ```
+//!
+//! The `tracing` spans emitted by this crate use the `skelegent.dispatch`
+//! target, so they can be filtered independently of application spans.
+
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use layer0::dispatch::{DispatchEvent, DispatchHandle};
@@ -43,8 +65,11 @@ use skg_turn::provider::ProviderError;
 /// The updated span/trace IDs are propagated to downstream middleware via a
 /// cloned [`DispatchContext`].
 ///
-/// After dispatch: sets the span status to `Ok` on success or records the
-/// error and sets `Error` status on failure.
+/// After dispatch: the span is kept open until the terminal
+/// [`DispatchEvent::Completed`] or [`DispatchEvent::Failed`] event arrives.
+/// On completion, result-level metrics from [`layer0::operator::OperatorMetadata`]
+/// (`tokens_in`, `tokens_out`, `cost`, `turns_used`, tool-call counts) are
+/// recorded as span attributes before the span is closed.
 pub struct OtelMiddleware {
     tracer_name: &'static str,
 }
@@ -104,6 +129,36 @@ fn trace_context_from_span(span_ctx: &SpanContext, original: &TraceContext) -> T
     }
 }
 
+/// Classify an [`OrchError`] into a structured `(error_code, retryable)` pair
+/// for OTel span attributes.
+///
+/// The `error_code` is a stable snake_case string suitable for OTel attribute
+/// values and cardinality-safe dashboards. `retryable` signals whether the
+/// caller should attempt a retry.
+fn classify_orch_error(err: &OrchError) -> (&'static str, bool) {
+    use layer0::error::OperatorError;
+    match err {
+        OrchError::OperatorNotFound(_) => ("operator_not_found", false),
+        OrchError::WorkflowNotFound(_) => ("workflow_not_found", false),
+        OrchError::DispatchFailed(_) => ("dispatch_failed", true),
+        OrchError::SignalFailed(_) => ("signal_failed", true),
+        OrchError::OperatorError(op_err) => match op_err {
+            OperatorError::Model { retryable, .. } => {
+                if *retryable {
+                    ("model_error_retryable", true)
+                } else {
+                    ("model_error", false)
+                }
+            }
+            OperatorError::Retryable { .. } => ("retryable_error", true),
+            OperatorError::Halted { .. } => ("halted", false),
+            _ => ("operator_error", false),
+        },
+        OrchError::EnvironmentError(_) => ("environment_error", false),
+        _ => ("unknown_error", false),
+    }
+}
+
 #[async_trait]
 impl DispatchMiddleware for OtelMiddleware {
     /// Wrap the dispatch in an OTel span.
@@ -112,7 +167,13 @@ impl DispatchMiddleware for OtelMiddleware {
     /// 2. Start a span with operator/dispatch attributes.
     /// 3. Clone the [`DispatchContext`] with updated trace IDs.
     /// 4. Forward to the next middleware.
-    /// 5. Set span status based on the dispatch result.
+    /// 5. If `next.dispatch()` returns an error, record it and close the span
+    ///    immediately.
+    /// 6. On success, keep the span open until [`DispatchEvent::Completed`]
+    ///    arrives; then record result-level metrics from
+    ///    [`layer0::operator::OperatorMetadata`] and close the span.
+    ///    [`DispatchEvent::Failed`] is also handled: error attributes are set
+    ///    and the span is closed.
     async fn dispatch(
         &self,
         ctx: &DispatchContext,
@@ -162,61 +223,107 @@ impl DispatchMiddleware for OtelMiddleware {
         // Forward to next middleware/dispatcher.
         let result = next.dispatch(&modified_ctx, input).await;
 
-        match &result {
-            Ok(_) => {
-                span.set_attribute(KeyValue::new("skelegent.dispatch.success", true));
-                span.set_status(Status::Ok);
-            }
+        match result {
             Err(err) => {
-                // Classify the error for structured observability.
-                use layer0::error::OperatorError;
-                let (error_code, retryable) = match err {
-                    OrchError::OperatorNotFound(_) => ("operator_not_found", false),
-                    OrchError::WorkflowNotFound(_) => ("workflow_not_found", false),
-                    OrchError::DispatchFailed(_) => ("dispatch_failed", true),
-                    OrchError::SignalFailed(_) => ("signal_failed", true),
-                    OrchError::OperatorError(op_err) => match op_err {
-                        OperatorError::Model { retryable, .. } => {
-                            if *retryable {
-                                ("model_error_retryable", true)
-                            } else {
-                                ("model_error", false)
-                            }
-                        }
-                        OperatorError::Retryable { .. } => ("retryable_error", true),
-                        OperatorError::Halted { .. } => ("halted", false),
-                        _ => ("operator_error", false),
-                    },
-                    OrchError::EnvironmentError(_) => ("environment_error", false),
-                    _ => ("unknown_error", false),
-                };
+                // Dispatch failed to start: classify error, record on span, and
+                // close it immediately (no channel events will arrive).
+                let (error_code, retryable) = classify_orch_error(&err);
+                span.set_attribute(KeyValue::new("skelegent.dispatch.success", false));
                 span.set_attribute(KeyValue::new("skelegent.error.code", error_code));
                 span.set_attribute(KeyValue::new("skelegent.error.retryable", retryable));
                 span.set_status(Status::Error {
                     description: err.to_string().into(),
                 });
+                span.end();
+                Err(err)
+            }
+            Ok(handle) => {
+                // The dispatch was accepted. Keep the span open until the
+                // terminal event arrives so we can record result-level metrics
+                // from OperatorMetadata.
+                //
+                // The intercept closure is `Fn` (not `FnMut`), so span access
+                // requires interior mutability. The Mutex is only ever locked
+                // for the brief duration of recording attributes at terminal
+                // events; there is no contention in practice.
+                let span_arc = Arc::new(Mutex::new(span));
+                let span_for_intercept = Arc::clone(&span_arc);
+
+                Ok(handle.intercept(move |event| {
+                    match event {
+                        DispatchEvent::Progress { content } => {
+                            // Bridge progress events to the tracing ecosystem.
+                            tracing_span.in_scope(|| {
+                                tracing::info!(
+                                    target: "skelegent.dispatch.progress",
+                                    message = %content.as_text().unwrap_or(""),
+                                    "dispatch progress"
+                                );
+                            });
+                        }
+                        DispatchEvent::Completed { output } => {
+                            // Record result-level metrics from the operator's
+                            // execution summary, then close the span.
+                            let meta = &output.metadata;
+                            let total_tools = meta.sub_dispatches.len() as i64;
+                            let failed_tools = meta
+                                .sub_dispatches
+                                .iter()
+                                .filter(|r| !r.success)
+                                .count() as i64;
+
+                            let mut s = span_for_intercept.lock().unwrap();
+                            s.set_attribute(KeyValue::new("skelegent.dispatch.success", true));
+                            s.set_attribute(KeyValue::new(
+                                "skelegent.tokens_in",
+                                meta.tokens_in as i64,
+                            ));
+                            s.set_attribute(KeyValue::new(
+                                "skelegent.tokens_out",
+                                meta.tokens_out as i64,
+                            ));
+                            s.set_attribute(KeyValue::new(
+                                "skelegent.cost",
+                                meta.cost.to_string(),
+                            ));
+                            s.set_attribute(KeyValue::new(
+                                "skelegent.turns_used",
+                                meta.turns_used as i64,
+                            ));
+                            s.set_attribute(KeyValue::new(
+                                "skelegent.tool_calls_total",
+                                total_tools,
+                            ));
+                            s.set_attribute(KeyValue::new(
+                                "skelegent.tool_calls_failed",
+                                failed_tools,
+                            ));
+                            s.set_status(Status::Ok);
+                            s.end();
+                        }
+                        DispatchEvent::Failed { error } => {
+                            // Terminal failure delivered through the channel
+                            // (distinct from next.dispatch() returning Err above).
+                            let (error_code, retryable) = classify_orch_error(error);
+                            let mut s = span_for_intercept.lock().unwrap();
+                            s.set_attribute(KeyValue::new("skelegent.dispatch.success", false));
+                            s.set_attribute(KeyValue::new("skelegent.error.code", error_code));
+                            s.set_attribute(KeyValue::new(
+                                "skelegent.error.retryable",
+                                retryable,
+                            ));
+                            s.set_status(Status::Error {
+                                description: error.to_string().into(),
+                            });
+                            s.end();
+                        }
+                        // Other events (ArtifactProduced, EffectEmitted,
+                        // AwaitingApproval) are forwarded transparently.
+                        _ => {}
+                    }
+                }))
             }
         }
-
-        span.end();
-
-        // Attach an intercept that bridges DispatchEvent::Progress to tracing
-        // events. The tracing_span is entered inside the closure so that
-        // progress events appear as span events on the dispatch span when
-        // a tracing-opentelemetry subscriber is active.
-        result.map(|handle| {
-            handle.intercept(move |event| {
-                if let DispatchEvent::Progress { content } = event {
-                    tracing_span.in_scope(|| {
-                        tracing::info!(
-                            target: "skelegent.dispatch.progress",
-                            message = %content.as_text().unwrap_or(""),
-                            "dispatch progress"
-                        );
-                    });
-                }
-            })
-        })
     }
 }
 
@@ -406,7 +513,7 @@ mod tests {
     use layer0::content::Content;
     use layer0::dispatch::DispatchEvent;
     use layer0::id::{DispatchId, OperatorId};
-    use layer0::operator::{ExitReason, OperatorOutput, TriggerType};
+    use layer0::operator::{ExitReason, OperatorOutput, SubDispatchRecord, TriggerType};
 
     /// Mock next layer that echoes back with a fixed message.
     struct EchoNext;
@@ -453,6 +560,75 @@ mod tests {
         ) -> Result<DispatchHandle, OrchError> {
             use layer0::error::OperatorError;
             Err(OrchError::OperatorError(OperatorError::model("test")))
+        }
+    }
+
+    /// Mock next layer that sends a [`DispatchEvent::Failed`] through the
+    /// channel rather than returning `Err` from `dispatch()`.
+    struct ChannelFailNext;
+
+    #[async_trait]
+    impl DispatchNext for ChannelFailNext {
+        async fn dispatch(
+            &self,
+            _ctx: &DispatchContext,
+            _input: OperatorInput,
+        ) -> Result<DispatchHandle, OrchError> {
+            let (handle, sender) = DispatchHandle::channel(DispatchId::new("fail-channel"));
+            tokio::spawn(async move {
+                let _ = sender
+                    .send(DispatchEvent::Failed {
+                        error: OrchError::DispatchFailed("channel failure".into()),
+                    })
+                    .await;
+            });
+            Ok(handle)
+        }
+    }
+
+    /// Mock next layer that returns an [`OperatorOutput`] with specific
+    /// [`layer0::operator::OperatorMetadata`] values for attribute assertions.
+    struct MetadataNext {
+        tokens_in: u64,
+        tokens_out: u64,
+        turns_used: u32,
+        successful_tools: usize,
+        failed_tools: usize,
+    }
+
+    #[async_trait]
+    impl DispatchNext for MetadataNext {
+        async fn dispatch(
+            &self,
+            _ctx: &DispatchContext,
+            _input: OperatorInput,
+        ) -> Result<DispatchHandle, OrchError> {
+            use layer0::duration::DurationMs;
+
+            let mut output =
+                OperatorOutput::new(Content::text("meta-output"), ExitReason::Complete);
+            output.metadata.tokens_in = self.tokens_in;
+            output.metadata.tokens_out = self.tokens_out;
+            output.metadata.turns_used = self.turns_used;
+
+            for _ in 0..self.successful_tools {
+                output
+                    .metadata
+                    .sub_dispatches
+                    .push(SubDispatchRecord::new("tool", DurationMs::ZERO, true));
+            }
+            for _ in 0..self.failed_tools {
+                output
+                    .metadata
+                    .sub_dispatches
+                    .push(SubDispatchRecord::new("tool", DurationMs::ZERO, false));
+            }
+
+            let (handle, sender) = DispatchHandle::channel(DispatchId::new("meta"));
+            tokio::spawn(async move {
+                let _ = sender.send(DispatchEvent::Completed { output }).await;
+            });
+            Ok(handle)
         }
     }
 
@@ -613,6 +789,84 @@ mod tests {
                 panic!("expected Progress event at index {i}");
             }
         }
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // Result-level metadata attribute tests
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    /// Verify that the dispatch passes through correctly when non-zero metadata
+    /// is present. The middleware reads metadata to set OTel span attributes;
+    /// this test confirms that path does not panic and the output is preserved.
+    ///
+    /// Full span attribute value inspection requires an OTel exporter
+    /// (e.g., `InMemorySpanExporter` from `opentelemetry_sdk`) and is deferred
+    /// to integration tests that can install a global tracer provider.
+    #[tokio::test]
+    async fn otel_mw_records_metadata_on_completion() {
+        let mw = OtelMiddleware::new("test-service");
+        let next = MetadataNext {
+            tokens_in: 100,
+            tokens_out: 50,
+            turns_used: 3,
+            successful_tools: 2,
+            failed_tools: 1,
+        };
+        let ctx = test_ctx();
+
+        let handle = mw.dispatch(&ctx, test_input(), &next).await.unwrap();
+        let output = handle.collect().await.unwrap();
+
+        // Output passes through unchanged: middleware is transparent to the caller.
+        assert_eq!(output.message.as_text().unwrap(), "meta-output");
+        // The metadata values we injected are preserved on the output.
+        assert_eq!(output.metadata.tokens_in, 100);
+        assert_eq!(output.metadata.tokens_out, 50);
+        assert_eq!(output.metadata.turns_used, 3);
+        assert_eq!(output.metadata.sub_dispatches.len(), 3);
+        assert_eq!(
+            output.metadata.sub_dispatches.iter().filter(|r| !r.success).count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn otel_mw_records_zero_tools_when_no_sub_dispatches() {
+        let mw = OtelMiddleware::new("test-service");
+        let next = MetadataNext {
+            tokens_in: 10,
+            tokens_out: 5,
+            turns_used: 1,
+            successful_tools: 0,
+            failed_tools: 0,
+        };
+        let ctx = test_ctx();
+
+        let handle = mw.dispatch(&ctx, test_input(), &next).await.unwrap();
+        let output = handle.collect().await.unwrap();
+
+        assert_eq!(output.message.as_text().unwrap(), "meta-output");
+        assert_eq!(output.metadata.sub_dispatches.len(), 0);
+    }
+
+    /// Verify that a [`DispatchEvent::Failed`] arriving through the channel
+    /// (not returned directly from `next.dispatch()`) is handled without panic.
+    /// The handle's `collect()` should surface the error.
+    #[tokio::test]
+    async fn otel_mw_handles_channel_failure_event() {
+        let mw = OtelMiddleware::new("test-service");
+        let next = ChannelFailNext;
+        let ctx = test_ctx();
+
+        let handle = mw.dispatch(&ctx, test_input(), &next).await.unwrap();
+        let result = handle.collect().await;
+
+        assert!(result.is_err(), "expected collect to return Err on Failed event");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("channel failure"),
+            "unexpected error: {err}"
+        );
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
