@@ -169,7 +169,12 @@ impl A2aServer {
             .route(
                 "/.well-known/agent.json",
                 get({
-                    move || async move { axum::Json(card) }
+                    move || async move {
+                        (
+                            [(axum::http::header::CACHE_CONTROL, "max-age=3600, public")],
+                            axum::Json(card),
+                        )
+                    }
                 }),
             )
             .route("/", post(handlers::handle_jsonrpc))
